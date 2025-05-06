@@ -19,6 +19,12 @@ If you send a library for long-read sequencing tagged with UMIs, you will get ba
 
 -----------------------------------------------------
 
+---- Identifying and counting mutants from long-read data without UMIs ----
+
+Sometimes, you won't have UMIs, but still want to call mutations from a pool of long-reads. This script allows you to do just that. You need to save your gene reference (coding sequence only) in data/mutation_caller_template.fasta. Then, simply save your .fastq.gz file in /data, and run 'make mutation_caller'. It will show you a bar plot of the number of mutations at each position - use this to inform the threshold for a reliable call. Enter this in the command line, and then the list of single mutations will be saved to results/singles, and single mutants that co-occur (i.e. are likely present as double mutants) will be saved in results/coocuring_mutations.csv.
+
+-----------------------------------------------------
+
 ---- Making mutant proteins with SLIM ----
 
 This is a quick tool to design primers for SLIM cloning, which can add mutations to specific spots in a protein with overnight ease.
