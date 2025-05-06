@@ -18,3 +18,24 @@ Once you navigate to the root and setup your conda environment using the command
 If you send a library for long-read sequencing tagged with UMIs, you will get back a .fastq.gz file that can be complex to interpret. This script runs in a dictionary-free way, finding UMIs and genes based on user-provided flanking regions. Simply place your .fastq.gz files in data/ along with a gene template for your coding sequence (template.fasta) and a configuration umi_hunter.csv. This file should have columns umi_flanks,gene_flanks,umi_min_max. These columns should be populated with entry one being the upstream flank and entry two being the downstream flank. The umi_min_max should be populated with the first entry being minimum expected UMI length, and the second entry being the maximum expected umi length. The script will output a set of files into results/, where you will find the UMI-gene clusters, their counts, and the consensus genes for clusters with >10 representatives. It will also tell you the length difference of the consensus compared to the reference, which will allow you to identify any indels that may be present.
 
 -----------------------------------------------------
+
+---- Making mutant proteins with SLIM ----
+
+This is a quick tool to design primers for SLIM cloning, which can add mutations to specific spots in a protein with overnight ease.
+
+Simply add your gene template (coding sequence only) to data/slim_template_gene.fasta and your whole plasmid to data/slim_context.fasta. Ensure that your gene is contiguous in the context file and not split over the start and end. Then, specify mutants in the file data/slim_target_mutations.csv, naming the first column 'mutations' and then specifying mutations in the form 'M1P', or wild-type, position, mutant.
+
+Experimental:
+
+Total time:
+~ 3h hands-on (not inc. protein purification), 72h DNA -> pure mutant protein
+
+Contributions:
+2x PCRs (~2h + 10 mins setup), SLIM thermocycling (50 mins), transformation (30 mins setup + overnight incubation), colony growth (5 mins hands-on, 12 h growth), DNA recovery (important for validation, 30 mins hands-on), protein expression and purification (2x overnight)
+
+SLIM protocol:
+Once you have the primers, run two normal PCRs using (A) long fwd + short rvs and (B) long rvs + short fwd. You can then add 10 ul of each PCR product to 10 ul of H-buffer, composed of 150 mM Tris pH 8, 400 mM NaCl and 60 mM EDTA. Incubate this (total volume 30 ul) in a thermocycler using the following protocol: 99 oC, 3:00 -> 2x [65 oC, 5:00 -> 30 oC, 15:00] -> Hold at 4 oC. You may then transform either NEB 5a or BL21 (DE3) with this mixture without further purification.
+
+This code has been experimentally validated for designing a set of 12 mutations into a WT sequence.
+
+-----------------------------------------------------
