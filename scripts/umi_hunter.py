@@ -257,7 +257,7 @@ def write_gene_csv(output_file, clusters, verbose=True):
     with open(output_file, 'w', newline='') as csvfile:
         writer = csv.writer(csvfile)
         writer.writerow(["Cluster Representative", "Total Count", "Consensus Gene", "Length Difference", "Members"])
-        clusters_to_align = [c for c in clusters if c['total_count'] > 10]
+        clusters_to_align = [c for c in clusters if c['total_count'] > 0] ####### change threshold
         for i, cluster in enumerate(tqdm(clusters_to_align, desc="Processing UMI clusters", unit="cluster")):
             if verbose:
                 print("Processing cluster {}/{} (Rep: {}, Count: {})".format(

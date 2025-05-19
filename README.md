@@ -11,6 +11,12 @@ Illumina will try to sell you expensive kits to use their sequencers, when this 
 
 Once you navigate to the root and setup your conda environment using the commands at the top of the readme, you can run make nextera_primers and a new .csv will appear in results, ready for ordering! Once you have run a PCR with these primers and purified the products, they can be loaded directly on to the flow-cell. Enjoy!
 
+Pipeline for kit-free illumina sample prep:
+
+	1. PCR using a i5/i7 primer pair, monitor a portion of the reaction using qPCR. Cap the cycle number so as to get only 10% of the final yield. This minimises PCR amplification bias.
+	2. Purify the DNA product, removing primers. This is important as the primers will be in great molar excess due to their small size, and will flood the chip with their binding regions. Purification is easiest using SPRIselect beads from Beckman Coulter. You will have to empirically determine the bead:DNA volume ratio that removes primers while retaining amplicon for your sample - a good starting point is a (bead volume) / (DNA volume) = 0.65. 
+	3. Verify primer removal using electrophoresis. This is best performed using a 2100 BioAnalyser and a DNA detection chip. Ensure that the molar ratio is satisfactory - you will loose read depth in a manner proportional to the primer impurities in the sample. 
+
 -----------------------------------------------------
 
 ---- Identifying, counting and generating consensus UMI-gene pairings ----
