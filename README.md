@@ -37,6 +37,19 @@ This is a quick tool to design primers for SLIM cloning, which can add mutations
 
 Simply add your gene template (coding sequence only) to data/slim_template_gene.fasta and your whole plasmid to data/slim_context.fasta. Ensure that your gene is contiguous in the context file and not split over the start and end. Then, specify mutants in the file data/slim_target_mutations.csv, naming the first column 'mutations' and then specifying mutations in the form 'M1P', or wild-type, position, mutant.
 
+If you have an insertion, the form is e.g. G56GT (read: insertion of T after G). If the insertion is inside a codon (read: insertion of a triplet in G56 that results in TP) the nomclamenture is G56TP.
+
+If you have a clean deletion, the form is e.g. G56Del (read: deletion of G56). If the deletion in inter-codon, (read: deletion of a triple between G56 and L57 resulting in P at these positions) the form is G56InDelL57P.
+
+In summary, some examples:
+
+            Substitution:        A123G
+            Deletion:            T241Del
+            InDel (inter-codon): T241InDelA242S
+            Insertion after codon: T241TS (insert Ser after Thr241)
+            Codon replacement insertion: L46GP (replace Leu46 with Gly-Pro)
+
+
 Experimental:
 
 Total time:
