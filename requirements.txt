@@ -3,3 +3,5 @@ pyyaml
 tqdm
 biopython
 matplotlib
+pysam
+scipy

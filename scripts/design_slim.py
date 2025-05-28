@@ -183,11 +183,11 @@ def design_short_forward(full_seq, lr_end):
 # -----------------------------------------
 def main():
     # Load gene and context sequences from FASTA
-    gene = str(next(SeqIO.parse("data/slim_template_gene.fasta", "fasta")).seq).upper()
-    context = str(next(SeqIO.parse("data/slim_context.fasta", "fasta")).seq).upper()
+    gene = str(next(SeqIO.parse("data/design_slim/slim_template_gene.fasta", "fasta")).seq).upper()
+    context = str(next(SeqIO.parse("data/design_slim/slim_context.fasta", "fasta")).seq).upper()
 
     # Load mutations from CSV
-    df = pd.read_csv("data/slim_target_mutations.csv")
+    df = pd.read_csv("data/design_slim/slim_target_mutations.csv")
     mutations = df["mutations"].dropna().tolist()
 
     # Align gene within context
@@ -199,7 +199,7 @@ def main():
     gene_len = len(gene)
 
     os.makedirs("results", exist_ok=True)
-    with open("results/SLIM_primers.csv", "w", newline="") as csvfile:
+    with open("results/design_slim/SLIM_primers.csv", "w", newline="") as csvfile:
         writer = csv.writer(csvfile)
         writer.writerow(["Primer Name", "Sequence"])
 
@@ -272,7 +272,7 @@ def main():
             writer.writerow([mutation + '_Lr', lr_seq])
             writer.writerow([mutation + '_Sf', sf_seq])
 
-    print("results/SLIM_primers.csv created successfully.")
+    print("results/design_slim/SLIM_primers.csv created successfully.")
 
 if __name__ == "__main__":
     main()

@@ -18,7 +18,7 @@ from Bio.SeqRecord import SeqRecord
 from Bio.Align.Applications import MafftCommandline
 
 # Load flanking data
-flanks_df = pd.read_csv("data/umi_hunter.csv")
+flanks_df = pd.read_csv("data/umi_hunter/umi_hunter.csv")
 
 # UMI flanks and limits
 umi_start = flanks_df.loc[0, 'umi_flanks']
@@ -158,7 +158,7 @@ def generate_custom_consensus_mafft(gene_seqs, verbose=True, mutation_threshold=
         
     # Load the reference sequence from template.fasta.
     try:
-        template_record = next(SeqIO.parse("data/template.fasta", "fasta"))
+        template_record = next(SeqIO.parse("data/umi_hunter/template.fasta", "fasta"))
     except Exception as e:
         raise RuntimeError("Failed to load template.fasta: " + str(e))
         
@@ -247,7 +247,7 @@ def write_gene_csv(output_file, clusters, verbose=True):
     """
     # Load the reference to get its length (remove any gaps)
     try:
-        ref_record = next(SeqIO.parse("data/template.fasta", "fasta"))
+        ref_record = next(SeqIO.parse("data/umi_hunter/template.fasta", "fasta"))
         ref_seq = str(ref_record.seq).replace("-", "")
         ref_length = len(ref_seq)
     except Exception as e:
@@ -274,9 +274,9 @@ def write_gene_csv(output_file, clusters, verbose=True):
     return consensus_records
 
 def main():
-    fastq_files = glob.glob("data/*.fastq.gz")
+    fastq_files = glob.glob("data/umi_hunter/*.fastq.gz")
     if not fastq_files:
-        print("No .fastq.gz files found in data/.")
+        print("No .fastq.gz files found in data/umi_hunter.")
         return
 
     # Process each FASTQ file
@@ -293,16 +293,16 @@ def main():
         if base.endswith(".fastq"):
             base = os.path.splitext(base)[0]
         
-        umi_csv = "results/{}_UMI_clusters.csv".format(base)
+        umi_csv = "results/umi_hunter/{}_UMI_clusters.csv".format(base)
         write_umi_csv(umi_csv, clusters)
         print("UMI clusters written to {}".format(umi_csv))
 
-        gene_csv = "results/{}_gene_consensus.csv".format(base)
+        gene_csv = "results/umi_hunter/{}_gene_consensus.csv".format(base)
         consensus_records = write_gene_csv(gene_csv, clusters, verbose=True)
         print("Gene consensus data (for clusters >10 reads) written to {}".format(gene_csv))
 
         # Write a FASTA file containing all consensus sequences for this FASTQ file.
-        fasta_out = "results/{}_consensuses.fasta".format(base)
+        fasta_out = "results/umi_hunter/{}_consensuses.fasta".format(base)
         SeqIO.write(consensus_records, fasta_out, "fasta")
         print("Consensus sequences saved to {}\n".format(fasta_out))
 

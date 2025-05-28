@@ -15,7 +15,7 @@ from scipy.stats import fisher_exact
 from tqdm import tqdm
 
 # Load flanking data
-flanks_df = pd.read_csv("data/mutation_caller.csv")
+flanks_df = pd.read_csv("data/mutation_caller/mutation_caller.csv")
 gene_start = flanks_df.loc[0, 'gene_flanks']
 gene_end = flanks_df.loc[1, 'gene_flanks']
 gene_min = int(flanks_df.loc[0, 'gene_min_max'])
@@ -168,7 +168,7 @@ def find_cooccurring(subs_by_read, frequent_subs):
                 cooccur.append((sub_list[i], sub_list[j], both, A_total, B_total))
 
     pd.DataFrame(cooccur, columns=["Sub1", "Sub2", "Both_Count", "Sub1_Count", "Sub2_Count"])\
-        .to_csv("results/cooccuring_mutations.csv", index=False)
+        .to_csv("results/mutation_caller/cooccuring_mutations.csv", index=False)
 
 
     df = pd.DataFrame(matrix, columns=sub_list)
@@ -191,19 +191,19 @@ def find_cooccurring(subs_by_read, frequent_subs):
                 except Exception as e:
                     print(f"Skipping {sub_list[i]} vs {sub_list[j]}: {e}")
 
-    pd.DataFrame(cooccur, columns=["Sub1", "Sub2", "p-value"]).to_csv("results/cooccuring_mutations.csv", index=False)
+    pd.DataFrame(cooccur, columns=["Sub1", "Sub2", "p-value"]).to_csv("results/mutation_caller/cooccuring_mutations.csv", index=False)
 
 
 def main():
     all_reads = {}
-    for f in glob.glob("data/*.fastq.gz"):
+    for f in glob.glob("data/mutation_caller/*.fastq.gz"):
         print(f"Reading {f}...")
         reads = process_fastq(f)
         all_reads.update(reads)
     print(f"Total valid reads: {len(all_reads)}")
 
     # Load template
-    template = str(next(SeqIO.parse("data/mutation_caller_template.fasta", "fasta")).seq)
+    template = str(next(SeqIO.parse("data/mutation_caller/mutation_caller_template.fasta", "fasta")).seq)
     ref_aligned, aligned = align_to_reference(all_reads, template)
     subs_by_read = identify_substitutions(ref_aligned, aligned)
 
@@ -214,14 +214,14 @@ def main():
     plt.bar(substitution_counts.keys(), substitution_counts.values())
     plt.xticks(rotation=90)
     plt.tight_layout()
-    plt.savefig("results/substitution_rate.png")
+    plt.savefig("results/mutation_caller/substitution_rate.png")
     plt.show()
 
     # Now ask for threshold
     threshold = int(input("Enter substitution occurrence threshold: "))
 
     # Save frequent substitutions
-    with open("results/singles.csv", "w") as f:
+    with open("results/mutation_caller/singles.csv", "w") as f:
         f.write("Substitution,Count\n")
         for sub, count in substitution_counts.items():
             if count >= threshold:

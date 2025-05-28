@@ -25,6 +25,9 @@ design_slim:
 mutation_caller:
 	python -m scripts.mutation_caller
 
+mutation_rate_calculator:
+	python -m scripts.mut_rate
+
 clean:
 	rm -rf results/*.png
 	rm -rf results/*.csv

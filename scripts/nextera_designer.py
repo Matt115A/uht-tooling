@@ -3,16 +3,16 @@ import yaml
 import pandas as pd
 
 
-##### INPUT: In /data/, place a file called nextera_designer.csv, that has the template binding sequences in the first column, which should be named binding_region. These should be the PCR primers you intend to use. Then run this script ######
+##### INPUT: In /data/nextera_designer/, place a file called nextera_designer.csv, that has the template binding sequences in the first column, which should be named binding_region. These should be the PCR primers you intend to use. Then run this script ######
 
 # === LOAD DATA ===
-df = pd.read_csv("data/nextera_designer.csv")
+df = pd.read_csv("data/nextera_designer/nextera_designer.csv")
 
 # === USER SETTINGS ===
 TEMPLATE_BINDING_SEQUENCE_i7 = df['binding_region'].iloc[0]  # First entry
 TEMPLATE_BINDING_SEQUENCE_i5 = df['binding_region'].iloc[1]  # Second entry
 
-OUTPUT_FILE = "results/nextera_xt_primers.csv"
+OUTPUT_FILE = "results/nextera_designer/nextera_xt_primers.csv"
 
 # === Index definitions ===
 i7_indexes = {
