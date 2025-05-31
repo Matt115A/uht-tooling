@@ -14,7 +14,7 @@ The currently available commands are:
 	make umi_hunter
 	make design_slim
 	make mutation_caller
-	make mutation_rate_calculator
+	make ep-library-profile
 
 -----------------------------------------------------
 
@@ -36,7 +36,7 @@ Pipeline for kit-free illumina sample prep:
 
 ---- Identifying, counting and generating consensus UMI-gene pairings ----
 
-If you send a library for long-read sequencing tagged with UMIs, you will get back a .fastq.gz file that can be complex to interpret. This script runs in a dictionary-free way, finding UMIs and genes based on user-provided flanking regions. Simply place your .fastq.gz files in data/umi_hunter/ along with a gene template for your coding sequence (template.fasta) and a configuration umi_hunter.csv. This file should have columns umi_flanks,gene_flanks,umi_min_max. These columns should be populated with the first row being the upstream flank and the second row being the downstream flank. The umi_min_max should be populated with the first row being minimum expected UMI length, and the second row being the maximum expected umi length. The script will output a set of files into results/umi_hunter/, where you will find the UMI-gene clusters, their counts, and the consensus genes for clusters with >10 representatives. It will also tell you the length difference of the consensus compared to the reference, which will allow you to identify any indels that may be present.
+If you send a library for long-read sequencing tagged with UMIs, you will get back a .fastq.gz file that can be complex to interpret. This script runs in a dictionary-free way, finding UMIs and genes based on user-provided flanking regions. Simply place your .fastq.gz files in data/umi_hunter/ along with a gene template for your coding sequence (template.fasta) and a configuration umi_hunter.csv. This file should have columns umi_flanks,gene_flanks,umi_min_max. These columns should be populated with the first row being the upstream flank and the second row being the downstream flank. The umi_min_max should be populated with the first row being minimum expected UMI length, and the second row being the maximum expected umi length. The script will output a set of files into results/umi_hunter/, where you will find the UMI-gene clusters, their counts, and the consensus genes for clusters with >10 representatives. It will also tell you the length difference of the consensus compared to the reference, which will allow you to identify any indels that may be present. By default, the script clusters at 90% UMI identity.
 
 -----------------------------------------------------
 
@@ -80,19 +80,42 @@ This code has been experimentally validated for designing a set of 12 mutations 
 
 -----------------------------------------------------
 
----- Mutation_rate_calculator: Calculating the mutation rate of a library without UMI-dependance ----
+---- ep-library-profile: Profiling a DNA library without UMI-dependance ----
 
-If you have cloned a DNA library that contains mutations, you will naturally be interested in the rate at which they occur to ensure you have achieved a reasonable mutational load. This code allows you to assess this mutational rate using the output from a whole-plasmid sequencing run.
+If you have cloned a DNA library that contains mutations, you will be interested in:
 
-Place your .fastq.gz file into /data/mutation_rate_calculator/, and also place your region of interest (region_of_interest.fasta) and the whole plasmid that contains the region of interest (plasmid.fasta) in here. Then simply run make mutation_rate_calculator. 
+- Cloning efficiency
+- Mutational rate
+- How mutational rate transfers to amino acid mutational rate
+- Mutational spectrum
+- Over-representation of specific mutations
+
+Using this code, you can get all of this information from a single whole-plasmid sequencing run. You must provide: 
+
+- .fastq.gz file(s), placed into /data/ep-library-profile/
+- mutational region of interest, /data/ep-library-profile/region_of_interest.fasta
+- whole plasmid containing the region of interest /data/ep-library-profile/plasmid.fasta
+
+Now run:
+
+make ep-library-profile
 
 You will receive:
-	1. The coverage of each region of the plasmid in the sequencing run, to assess whether the plasmid has been evenly sampled (this may be used to assess library cloning efficiency)
-	2. The mutation rate in your area of interest normalised by the background rate (calculated based on the plasmid) in basepairs
-	3. The estimated rate of amino acid mutations in the gene of interest, modelled under a Poisson distribution.
+- The coverage of each region of the plasmid in the sequencing run, to assess whether the plasmid has been evenly sampled (this may be used to assess library cloning efficiency)
+ - - This information is saved as a .csv file with coverage at each position calculated as the number of reads mapping to that position
+ - - This information is also saved to the panel .png and .pdf files, as 'Full Plasmid Coverage with ROI (region of interest) Shaded'
+- The mutation rate in your area of interest normalised by the background rate (calculated based on the plasmid) in basepairs
+ - - This information is found in the summary.txt file, saved in many ways and forms, which should be self-evident from the names.
+ - - It is also visualised in the summary plots as 'Mismatch Rate per Position: Gene of Interest'
+- The estimated rate of amino acid mutations in the gene of interest, modelled under a Poisson distribution
+ - - This information is saved in the summary.txt file, and also shown as the KDE plot in the summary plot - this plot estimates the odds of obtaining a mutant of a particular mutation order given a random pick from the library.
+ - - The amino acid mutation rate is based on the simulation of 1000 mutation events of your specified gene of interest, under the calculated Poisson distribution of amino acid mutations from your data.
+- The mutational spectrum is calculated from above-background mutational rate positions
+ - - This information can be found in the summary.txt file and also the _mutaion_spectrum.pdf file. The mutational spectrum reported in the literature for the commonly-used Mutazyme II kit is also reported as a reference.
+- The occurrence rates of specific mutations at sites with above-background mutational rates. If you have over-sampled your library, you can use this to estimate the relative abundance of mutations in each library.
+ - - This information is saved in gene_base_distribution.csv and gene_aa_substitution_rates.csv, for base mutations and amino acid substitutions respectively. The rate is saved as odds of occurrence per gene.
 
-
-These will be saved in results/mutation_rate_calculator/, in the log file and summary plots, along with .csv files to reproduce the plots. Note that the amino acid mutation rate is based on the simulation of 1000 mutation events, with the calculated Poisson distribution of amino acid mutations, so the results of this simulation are saved.
+These will be saved in results/ep-library-profile/, along with the log file. Note that the amino acid mutation rate is based on the simulation of 1000 mutation events, with the calculated Poisson distribution of amino acid mutations.
 
 -----------------------------------------------------
 

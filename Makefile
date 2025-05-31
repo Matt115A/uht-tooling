@@ -25,7 +25,7 @@ design_slim:
 mutation_caller:
 	python -m scripts.mutation_caller
 
-mutation_rate_calculator:
+ep-library-profile:
 	python -m scripts.mut_rate
 
 clean:
