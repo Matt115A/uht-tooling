@@ -80,11 +80,19 @@ This code has been experimentally validated for designing a set of 12 mutations 
 
 -----------------------------------------------------
 
----- Calculating the error rate of a library without UMI-dependance ----
+---- Mutation_rate_calculator: Calculating the mutation rate of a library without UMI-dependance ----
 
 If you have cloned a DNA library that contains mutations, you will naturally be interested in the rate at which they occur to ensure you have achieved a reasonable mutational load. This code allows you to assess this mutational rate using the output from a whole-plasmid sequencing run.
 
-Place your .fastq.gz file into /data/mutation_rate_calculator/, and also place your region of interest (region_of_interest.fasta) and the whole plasmid that contains the region of interest (plasmid.fasta) in here. Then simply run make mutation_rate_calculator, and the mutation rate in your area of interest compared to the background rate will be saved in results/mutation_rate_calculator/, in the log file. It will also be displayed in the terminal, along with plots that show how the mutations are distributed across the region of interest.
+Place your .fastq.gz file into /data/mutation_rate_calculator/, and also place your region of interest (region_of_interest.fasta) and the whole plasmid that contains the region of interest (plasmid.fasta) in here. Then simply run make mutation_rate_calculator. 
+
+You will receive:
+	1. The coverage of each region of the plasmid in the sequencing run, to assess whether the plasmid has been evenly sampled (this may be used to assess library cloning efficiency)
+	2. The mutation rate in your area of interest normalised by the background rate (calculated based on the plasmid) in basepairs
+	3. The estimated rate of amino acid mutations in the gene of interest, modelled under a Poisson distribution.
+
+
+These will be saved in results/mutation_rate_calculator/, in the log file and summary plots, along with .csv files to reproduce the plots. Note that the amino acid mutation rate is based on the simulation of 1000 mutation events, with the calculated Poisson distribution of amino acid mutations, so the results of this simulation are saved.
 
 -----------------------------------------------------
 

@@ -1,48 +1,30 @@
-2025-05-28 22:22:52,868 INFO: Starting mutation rate analysis run
-2025-05-28 22:22:52,869 INFO: Configuration: reads_pattern=data/mutation_rate_calculator/*.fastq.gz, ref_hit=data/mutation_rate_calculator/region_of_interest.fasta, plasmid=data/mutation_rate_calculator/plasmid.fasta
-2025-05-28 22:22:53,853 INFO: Loaded sequence Michal from data/mutation_rate_calculator/region_of_interest.fasta
-2025-05-28 22:22:53,853 INFO: Loaded sequence Michal from data/mutation_rate_calculator/plasmid.fasta
-2025-05-28 22:22:53,853 INFO: Writing 10 chunks to data/mutation_rate_calculator/tmp/plasmid_chunks.fasta
-2025-05-28 22:22:53,854 INFO: Running minimap2: minimap2 -ax map-ont data/mutation_rate_calculator/tmp/plasmid_chunks.fasta data/mutation_rate_calculator/613758401_In1_barcode73.fastq.gz -> data/mutation_rate_calculator/tmp/plasmid_chunks_alignment.sam
-2025-05-28 22:22:57,664 INFO: Running minimap2: minimap2 -ax map-ont data/mutation_rate_calculator/region_of_interest.fasta data/mutation_rate_calculator/613758401_In1_barcode73.fastq.gz -> data/mutation_rate_calculator/tmp/hit_alignment.sam
-2025-05-28 22:22:58,315 INFO: Computing mismatch stats for data/mutation_rate_calculator/tmp/plasmid_chunks_alignment.sam
-2025-05-28 22:23:08,484 INFO: chunk_1: mismatches=22115, covered=2648554, avg_rate=0.008350
-2025-05-28 22:23:08,484 INFO: chunk_2: mismatches=40163, covered=1647732, avg_rate=0.024375
-2025-05-28 22:23:08,484 INFO: chunk_3: mismatches=20490, covered=2026177, avg_rate=0.010113
-2025-05-28 22:23:08,484 INFO: chunk_4: mismatches=26368, covered=2397578, avg_rate=0.010998
-2025-05-28 22:23:08,484 INFO: chunk_5: mismatches=24304, covered=2659753, avg_rate=0.009138
-2025-05-28 22:23:08,484 INFO: chunk_6: mismatches=24751, covered=2681659, avg_rate=0.009230
-2025-05-28 22:23:08,485 INFO: chunk_7: mismatches=25039, covered=2682344, avg_rate=0.009335
-2025-05-28 22:23:08,485 INFO: chunk_8: mismatches=23398, covered=2681332, avg_rate=0.008726
-2025-05-28 22:23:08,485 INFO: chunk_9: mismatches=23067, covered=2653503, avg_rate=0.008693
-2025-05-28 22:23:08,485 INFO: chunk_10: mismatches=23490, covered=2642330, avg_rate=0.008890
-2025-05-28 22:23:08,485 INFO: Background total mismatches=253185, covered=24720962, rate=0.010242
-2025-05-28 22:23:08,485 INFO: Computing mismatch stats for data/mutation_rate_calculator/tmp/hit_alignment.sam
-2025-05-28 22:23:09,500 INFO: Michal: mismatches=9697, covered=738223, avg_rate=0.013136
-2025-05-28 22:23:09,500 INFO: Hit total mismatches=9697, covered=738223, rate=0.013136
-2025-05-28 22:23:09,502 INFO: Z-test: z=24.237, p-value=0.0
-2025-05-28 22:23:09,502 INFO: Hit error rate significantly higher (p<0.05), excess_kb=2.8939, avg_mutations=1.6148
-2025-05-28 23:26:38,784 INFO: Starting mutation rate analysis run
-2025-05-28 23:26:38,784 INFO: Configuration: reads_pattern=data/mutation_rate_calculator/*.fastq.gz, ref_hit=data/mutation_rate_calculator/region_of_interest.fasta, plasmid=data/mutation_rate_calculator/plasmid.fasta
-2025-05-28 23:26:39,236 INFO: Loaded sequence Michal from data/mutation_rate_calculator/region_of_interest.fasta
-2025-05-28 23:26:39,236 INFO: Loaded sequence Michal from data/mutation_rate_calculator/plasmid.fasta
-2025-05-28 23:26:39,236 INFO: Writing 10 chunks to data/mutation_rate_calculator/tmp/plasmid_chunks.fasta
-2025-05-28 23:26:39,237 INFO: Running minimap2: minimap2 -ax map-ont data/mutation_rate_calculator/tmp/plasmid_chunks.fasta data/mutation_rate_calculator/613758401_In1_barcode73.fastq.gz -> data/mutation_rate_calculator/tmp/plasmid_chunks_alignment.sam
-2025-05-28 23:26:42,916 INFO: Running minimap2: minimap2 -ax map-ont data/mutation_rate_calculator/region_of_interest.fasta data/mutation_rate_calculator/613758401_In1_barcode73.fastq.gz -> data/mutation_rate_calculator/tmp/hit_alignment.sam
-2025-05-28 23:26:43,541 INFO: Computing mismatch stats for data/mutation_rate_calculator/tmp/plasmid_chunks_alignment.sam
-2025-05-28 23:26:53,752 INFO: chunk_1: mismatches=22115, covered=2648554, avg_rate=0.008350
-2025-05-28 23:26:53,752 INFO: chunk_2: mismatches=40163, covered=1647732, avg_rate=0.024375
-2025-05-28 23:26:53,752 INFO: chunk_3: mismatches=20490, covered=2026177, avg_rate=0.010113
-2025-05-28 23:26:53,752 INFO: chunk_4: mismatches=26368, covered=2397578, avg_rate=0.010998
-2025-05-28 23:26:53,752 INFO: chunk_5: mismatches=24304, covered=2659753, avg_rate=0.009138
-2025-05-28 23:26:53,752 INFO: chunk_6: mismatches=24751, covered=2681659, avg_rate=0.009230
-2025-05-28 23:26:53,752 INFO: chunk_7: mismatches=25039, covered=2682344, avg_rate=0.009335
-2025-05-28 23:26:53,752 INFO: chunk_8: mismatches=23398, covered=2681332, avg_rate=0.008726
-2025-05-28 23:26:53,753 INFO: chunk_9: mismatches=23067, covered=2653503, avg_rate=0.008693
-2025-05-28 23:26:53,753 INFO: chunk_10: mismatches=23490, covered=2642330, avg_rate=0.008890
-2025-05-28 23:26:53,753 INFO: Background total mismatches=253185, covered=24720962, rate=0.010242
-2025-05-28 23:26:53,753 INFO: Computing mismatch stats for data/mutation_rate_calculator/tmp/hit_alignment.sam
-2025-05-28 23:26:54,740 INFO: Michal: mismatches=9697, covered=738223, avg_rate=0.013136
-2025-05-28 23:26:54,740 INFO: Hit total mismatches=9697, covered=738223, rate=0.013136
-2025-05-28 23:26:54,742 INFO: Z-test: z=24.237, p-value=0.0
-2025-05-28 23:26:54,742 INFO: Hit error rate significantly higher (p<0.05), excess_kb=2.8939, avg_mutations=1.6148
+2025-05-31 11:07:14,578 INFO: Starting mutation rate analysis run
+2025-05-31 11:07:14,578 INFO: Configuration: reads_pattern=data/mutation_rate_calculator/*.fastq.gz, ref_hit=data/mutation_rate_calculator/region_of_interest.fasta, plasmid=data/mutation_rate_calculator/plasmid.fasta
+2025-05-31 11:07:14,592 INFO: Loaded sequence WT from data/mutation_rate_calculator/region_of_interest.fasta
+2025-05-31 11:07:14,592 INFO: Loaded sequence plasmid from data/mutation_rate_calculator/plasmid.fasta
+2025-05-31 11:07:14,592 INFO: Writing 10 chunks to data/mutation_rate_calculator/tmp/plasmid_chunks.fasta
+2025-05-31 11:07:14,594 INFO: Running minimap2: minimap2 -ax map-ont data/mutation_rate_calculator/tmp/plasmid_chunks.fasta data/mutation_rate_calculator/614781501_p96_barcode24.fastq.gz → data/mutation_rate_calculator/tmp/plasmid_chunks_alignment.sam
+2025-05-31 11:07:14,962 INFO: Running minimap2: minimap2 -ax map-ont data/mutation_rate_calculator/region_of_interest.fasta data/mutation_rate_calculator/614781501_p96_barcode24.fastq.gz → data/mutation_rate_calculator/tmp/hit_alignment.sam
+2025-05-31 11:07:15,069 INFO: Computing mismatch stats for data/mutation_rate_calculator/tmp/plasmid_chunks_alignment.sam
+2025-05-31 11:07:16,094 INFO: chunk_1: mapped_reads=868, mismatches=1557, covered_bases=184306, avg_rate=0.008448
+2025-05-31 11:07:16,094 INFO: chunk_2: mapped_reads=711, mismatches=2699, covered_bases=255175, avg_rate=0.010577
+2025-05-31 11:07:16,094 INFO: chunk_3: mapped_reads=735, mismatches=2554, covered_bases=258765, avg_rate=0.009870
+2025-05-31 11:07:16,095 INFO: chunk_4: mapped_reads=729, mismatches=1796, covered_bases=259666, avg_rate=0.006917
+2025-05-31 11:07:16,095 INFO: chunk_5: mapped_reads=720, mismatches=2298, covered_bases=255875, avg_rate=0.008981
+2025-05-31 11:07:16,095 INFO: chunk_6: mapped_reads=713, mismatches=2163, covered_bases=255719, avg_rate=0.008459
+2025-05-31 11:07:16,095 INFO: chunk_7: mapped_reads=704, mismatches=2088, covered_bases=257371, avg_rate=0.008113
+2025-05-31 11:07:16,095 INFO: chunk_8: mapped_reads=696, mismatches=1755, covered_bases=256297, avg_rate=0.006848
+2025-05-31 11:07:16,095 INFO: chunk_9: mapped_reads=716, mismatches=2377, covered_bases=255816, avg_rate=0.009292
+2025-05-31 11:07:16,095 INFO: chunk_10: mapped_reads=698, mismatches=2198, covered_bases=257634, avg_rate=0.008531
+2025-05-31 11:07:16,095 INFO: Background (all chunks): total_mismatches=21485, covered_bases=2496624, mapped_reads=7290, rate_per_kb=8.6056
+2025-05-31 11:07:16,095 INFO: Computing mismatch stats for data/mutation_rate_calculator/tmp/hit_alignment.sam
+2025-05-31 11:07:16,429 INFO: WT: mapped_reads=766, mismatches=6317, covered_bases=372676, avg_rate=0.016950
+2025-05-31 11:07:16,429 INFO: Target (WT): total_mismatches=6317, covered_bases=372676, mapped_reads=766, rate_per_kb=16.9504
+2025-05-31 11:07:16,432 INFO: Z‐test: z=48.5101, p‐value=0.0000e+00
+2025-05-31 11:07:16,432 INFO: Simulating amino acid distribution with λ_bp=4.73
+2025-05-31 11:07:16,509 INFO: Saved CSV for gene mismatch rates: results/mutation_rate_calculator/gene_mismatch_rate.csv
+2025-05-31 11:07:16,509 INFO: Running minimap2: minimap2 -ax map-ont data/mutation_rate_calculator/plasmid.fasta data/mutation_rate_calculator/614781501_p96_barcode24.fastq.gz → data/mutation_rate_calculator/tmp/plasmid_full_alignment.sam
+2025-05-31 11:07:17,515 INFO: Saved CSV for plasmid coverage: results/mutation_rate_calculator/plasmid_coverage.csv
+2025-05-31 11:07:17,516 INFO: Saved CSV for AA mutation distribution: results/mutation_rate_calculator/aa_mutation_distribution.csv
+2025-05-31 11:07:18,284 INFO: Saved combined panel figure as PNG: results/mutation_rate_calculator/summary_panels.png
+2025-05-31 11:07:18,284 INFO: Saved combined panel figure as PDF: results/mutation_rate_calculator/summary_panels.pdf
