@@ -28,6 +28,9 @@ mutation_caller:
 ep-library-profile:
 	python -m scripts.mut_rate
 
+design_gibson:
+	python -m scripts.design_gibson
+
 clean:
 	rm -rf results/*.png
 	rm -rf results/*.csv

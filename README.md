@@ -80,6 +80,30 @@ This code has been experimentally validated for designing a set of 12 mutations 
 
 -----------------------------------------------------
 
+---- Making mutant proteins with Gibson assembly ----
+
+This is a quick tool to design primers for Gibson cloning, which can add mutations to specific spots in a protein with overnight ease.
+
+Simply add your gene template (coding sequence only) to data/design_gibson/gibson_template_gene.fasta and your whole plasmid to data/design_gibson/gibson_context.fasta. Then, specify mutants in the file data/design_gibson/gibson_target_mutations.csv, naming the first column 'mutations' and then specifying mutations in the form 'M1P', or wild-type, position, mutant.
+
+If you have an insertion, the form is e.g. G56GT (read: insertion of T after G). If the insertion is inside a codon (read: insertion of a triplet in G56 that results in TP) the nomclamenture is G56TP.
+
+If you have a clean deletion, the form is e.g. G56Del (read: deletion of G56). If the deletion in inter-codon, (read: deletion of a triple between G56 and L57 resulting in P at these positions) the form is G56InDelL57P.
+
+In summary, some examples:
+
+            Substitution:        A123G
+            Deletion:            T241Del
+            InDel (inter-codon): T241InDelA242S
+            Insertion after codon: T241TS (insert Ser after Thr241)
+            Codon replacement insertion: L46GP (replace Leu46 with Gly-Pro)
+
+You can specify a multi-mutant by adding a '+' between mutations, in one cell of the .csv file. You will get an accompanying csv in the output that describes the order in which to use the primers. 
+
+Please be aware that the code currently fails if the target mutations are too close together, and the primer regions would overlap. In this case, you should run the reaction sequentially to incorporate multi-mutations.
+
+-----------------------------------------------------
+
 ---- ep-library-profile: Profiling a DNA library without UMI-dependance ----
 
 If you have cloned a DNA library that contains mutations, you will be interested in:
