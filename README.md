@@ -99,7 +99,7 @@ In summary, some examples:
             Insertion after codon: T241TS (insert Ser after Thr241)
             Codon replacement insertion: L46GP (replace Leu46 with Gly-Pro)
 
-You can specify a multi-mutant by adding a '+' between mutations, in one cell of the .csv file. You will get an accompanying csv in the output that describes the order in which to use the primers. 
+You can specify a multi-mutant by adding a '+' between mutations, in one cell of the .csv file. You will get an accompanying csv in the output that describes the order in which to use the primers. It will also suggest the melting temperatures to use for each PCR, as well as the length of the PCR amplicon, to inform the elongation time.
 
 Please be aware that the code currently fails if the target mutations are too close together, and the primer regions would overlap. In this case, you should run the reaction sequentially to incorporate multi-mutations.
 
