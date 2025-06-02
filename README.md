@@ -15,6 +15,7 @@ The currently available commands are:
 	make design_slim
 	make mutation_caller
 	make ep-library-profile
+	make design_gibson
 
 -----------------------------------------------------
 
@@ -147,7 +148,7 @@ Coming soon:
 
 - Primer design for KLD cloning of mutants
 - Detailed log files for all scripts
-- Expansion of the primer design software for multi-mutations
+- Expansion of all primer design software for multi-mutations
 - Expansion of mutation caller to handle indels
 
 
