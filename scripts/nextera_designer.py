@@ -21,7 +21,13 @@ i7_indexes = {
     "703": "TTCTGCCT",
     "704": "GCTCAGGA",
     "705": "AGGAGTCC",
-    "706": "CATGCCTA"
+    "706": "CATGCCTA",
+    "707": "GTAGAGAG",
+    "708": "CCTCTCTG",
+    "709": "AGCGTAGC",
+    "710": "CAGCCTCG",
+    "711": "TGCCTCTT",
+    "712": "TCCTCTAC"
 }
 
 i5_indexes = {
@@ -30,7 +36,13 @@ i5_indexes = {
     "503": "TATCCTCT",
     "504": "AGAGTAGA",
     "505": "GTAAGGAG",
-    "506": "ACTGCATA"
+    "506": "ACTGCATA",
+    "507": "AAGGAGTA",
+    "508": "CTAAGCCT",
+    "510": "CGTCTAAT",
+    "511": "TCTCTCCG",
+    "513": "TCGACTAG",
+    "515": "TTCTAGCT"
 }
 
 # === Constant primer structures ===

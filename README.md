@@ -1,7 +1,18 @@
 To use this repo:
 
-chmod +x setup.sh
-./setup.sh
+You will need conda installed - follow these instructions;
+
+https://docs.conda.io/projects/conda/en/latest/user-guide/install/index.html
+
+Then, clone the repo into a directory of your choice by navigating there via command line and running: 
+
+	git clone https://github.com/Matt115A/uht-tooling.git
+
+Navigate to /uht-tooling/ and run:
+
+	chmod +x setup.sh
+
+	./setup.sh
 
 
 ---------- General structure ----------
