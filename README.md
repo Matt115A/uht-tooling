@@ -1,3 +1,5 @@
+# uht-tooling: automating the molecular biology accessory to ultra-high throughput screening
+
 To use this repo:
 
 You will need conda installed - follow these instructions;
@@ -15,7 +17,7 @@ Navigate to /uht-tooling/ and run:
 	./setup.sh
 
 
----------- General structure ----------
+##  General structure
 
 This code is set up do that configs and data are found in data/.../, where ... depends on the script that you care to run. Likewise, results are saved to results/.../
 
@@ -30,7 +32,7 @@ The currently available commands are:
 
 -----------------------------------------------------
 
----- Automated Nextera XT primer deșign software ----
+## Automated Nextera XT primer deșign software
 
 One-PCR-to-flowcell workflow
 
@@ -46,19 +48,19 @@ Pipeline for kit-free illumina sample prep:
 
 -----------------------------------------------------
 
----- Identifying, counting and generating consensus UMI-gene pairings ----
+## Identifying, counting and generating consensus UMI-gene pairings
 
 If you send a library for long-read sequencing tagged with UMIs, you will get back a .fastq.gz file that can be complex to interpret. This script runs in a dictionary-free way, finding UMIs and genes based on user-provided flanking regions. Simply place your .fastq.gz files in data/umi_hunter/ along with a gene template for your coding sequence (template.fasta) and a configuration umi_hunter.csv. This file should have columns umi_flanks,gene_flanks,umi_min_max. These columns should be populated with the first row being the upstream flank and the second row being the downstream flank. The umi_min_max should be populated with the first row being minimum expected UMI length, and the second row being the maximum expected umi length. The script will output a set of files into results/umi_hunter/, where you will find the UMI-gene clusters, their counts, and the consensus genes for clusters with >10 representatives. It will also tell you the length difference of the consensus compared to the reference, which will allow you to identify any indels that may be present. By default, the script clusters at 90% UMI identity.
 
 -----------------------------------------------------
 
----- Identifying and counting mutants from long-read data without UMIs ----
+## Identifying and counting mutants from long-read data without UMIs
 
 Sometimes, you won't have UMIs, but still want to call mutations from a pool of long-reads. This script allows you to do just that. You need to save your gene reference (coding sequence only) in data/mutation_caller/mutation_caller_template.fasta. Then, simply save your .fastq.gz file in data/mutation_caller, and run 'make mutation_caller'. It will show you a bar plot of the number of mutations at each position - use this to inform the threshold for a reliable call. Enter this in the command line, and then the list of single mutations will be saved to results/mutation_caller/singles, and single mutants that co-occur (i.e. are likely present as double mutants) will be saved in results/mutation_caller/coocuring_mutations.csv.
 
 -----------------------------------------------------
 
----- Making mutant proteins with SLIM ----
+## Making mutant proteins with SLIM
 
 This is a quick tool to design primers for SLIM cloning, which can add mutations to specific spots in a protein with overnight ease.
 
@@ -92,7 +94,7 @@ This code has been experimentally validated for designing a set of 12 mutations 
 
 -----------------------------------------------------
 
----- Making mutant proteins with Gibson assembly ----
+##  Making mutant proteins with Gibson assembly
 
 This is a quick tool to design primers for Gibson cloning, which can add mutations to specific spots in a protein with overnight ease.
 
@@ -116,7 +118,7 @@ Please be aware that the code currently fails if the target mutations are too cl
 
 -----------------------------------------------------
 
----- ep-library-profile: Profiling a DNA library without UMI-dependance ----
+## ep-library-profile: Profiling a DNA library without UMI-dependance 
 
 If you have cloned a DNA library that contains mutations, you will be interested in:
 
