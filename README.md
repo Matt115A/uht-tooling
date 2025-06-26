@@ -16,6 +16,7 @@ Navigate to /uht-tooling/ and run:
 
 	./setup.sh
 
+Please note, this setup.sh file is verified for Mac only. Results may vary on other OS.
 
 ##  General structure
 
@@ -90,7 +91,7 @@ Contributions:
 SLIM protocol:
 Once you have the primers, run two normal PCRs using (A) long fwd + short rvs and (B) long rvs + short fwd. You can then add 10 ul of each PCR product to 10 ul of H-buffer, composed of 150 mM Tris pH 8, 400 mM NaCl and 60 mM EDTA. Incubate this (total volume 30 ul) in a thermocycler using the following protocol: 99 oC, 3:00 -> 2x [65 oC, 5:00 -> 30 oC, 15:00] -> Hold at 4 oC. You may then transform either NEB 5a or BL21 (DE3) with this mixture without further purification.
 
-This code has been experimentally validated for designing a set of 12 mutations into a WT sequence.
+This code has been experimentally validated for designing 10s of mutations into a WT sequence.
 
 -----------------------------------------------------
 
