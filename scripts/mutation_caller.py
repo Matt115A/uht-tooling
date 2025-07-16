@@ -6,6 +6,7 @@ import re
 import os
 import tempfile
 import subprocess
+import logging
 from collections import defaultdict, Counter
 
 import numpy as np
@@ -215,118 +216,147 @@ def find_cooccurring_aa(subs_by_read_aa: dict, frequent_aa: set, output_dir: str
 
 # ----------------------------------------------------
 def main():
-    # load template (which is the ORF only)
-    tmpl = "data/mutation_caller/mutation_caller_template.fasta"
-    full_ref_record = next(SeqIO.parse(tmpl, "fasta"))
-    full_ref        = str(full_ref_record.seq)
+    # Setup logging
+    log_dir = "results/mutation_caller"
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, "mutation_caller.log")
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s: %(message)s",
+        handlers=[logging.FileHandler(log_file, mode='w'), logging.StreamHandler()]
+    )
+    logger = logging.getLogger("mutation_caller")
+    logger.info("Starting mutation caller run.")
+    try:
+        # load template (which is the ORF only)
+        tmpl = "data/mutation_caller/mutation_caller_template.fasta"
+        full_ref_record = next(SeqIO.parse(tmpl, "fasta"))
+        full_ref        = str(full_ref_record.seq)
+        logger.info(f"Loaded template sequence of length {len(full_ref)}.")
 
-    # if primers flank the ORF on the template, trim; otherwise use full ORF
-    if full_ref.startswith(gene_start) and full_ref.endswith(gene_end):
-        reference = full_ref[len(gene_start):-len(gene_end)]
-    else:
-        reference = full_ref
+        # if primers flank the ORF on the template, trim; otherwise use full ORF
+        if full_ref.startswith(gene_start) and full_ref.endswith(gene_end):
+            reference = full_ref[len(gene_start):-len(gene_end)]
+            logger.info("Trimmed flanking regions from template.")
+        else:
+            reference = full_ref
 
-    fastqs = glob.glob("data/mutation_caller/*.fastq.gz")
-    if not fastqs:
-        print("No FASTQ found; exiting.")
-        return
+        fastqs = glob.glob("data/mutation_caller/*.fastq.gz")
+        if not fastqs:
+            logger.warning("No FASTQ found; exiting.")
+            print("No FASTQ found; exiting.")
+            return
+        logger.info(f"Found {len(fastqs)} FASTQ files.")
 
-    for fq in fastqs:
-        base   = os.path.basename(fq)
-        sample = os.path.splitext(base)[0]
-        if sample.endswith(".fastq"):
-            sample = sample[:-6]
+        for fq in fastqs:
+            base   = os.path.basename(fq)
+            sample = os.path.splitext(base)[0]
+            if sample.endswith(".fastq"):
+                sample = sample[:-6]
 
-        out_dir = os.path.join("results","mutation_caller", base)
-        os.makedirs(out_dir, exist_ok=True)
+            out_dir = os.path.join("results","mutation_caller", base)
+            os.makedirs(out_dir, exist_ok=True)
 
-        print(f"\nProcessing {base} …")
-        gene_reads = process_fastq(fq)
-        n_reads    = len(gene_reads)
-        print(f"  → {n_reads} valid gene reads")
+            logger.info(f"Processing sample: {sample}")
+            print(f"\nProcessing {base} …")
+            gene_reads = process_fastq(fq)
+            n_reads    = len(gene_reads)
+            logger.info(f"  → {n_reads} valid gene reads")
+            print(f"  → {n_reads} valid gene reads")
 
-        if n_reads == 0:
-            continue
+            if n_reads == 0:
+                logger.warning(f"No valid gene reads for {sample}; skipping.")
+                continue
 
-        aligned_ref, aligned_reads = align_to_reference(gene_reads, reference)
-        subs = identify_substitutions(aligned_ref, aligned_reads)
+            aligned_ref, aligned_reads = align_to_reference(gene_reads, reference)
+            subs = identify_substitutions(aligned_ref, aligned_reads)
 
-        # AA-only dict
-        subs_aa = {rid: [it.split()[1][1:-1]
-                         for it in items if "(" in it and it.endswith(")")]
-                   for rid, items in subs.items()}
+            # AA-only dict
+            subs_aa = {rid: [it.split()[1][1:-1]
+                             for it in items if "(" in it and it.endswith(")")]
+                       for rid, items in subs.items()}
 
-        counts = Counter(aa for aas in subs_aa.values() for aa in aas)
-        if not counts:
-            print("  → No AA substitutions; skipping.")
-            continue
+            counts = Counter(aa for aas in subs_aa.values() for aa in aas)
+            if not counts:
+                logger.info(f"No AA substitutions for {sample}; skipping.")
+                print("  → No AA substitutions; skipping.")
+                continue
 
-        # plot frequencies with proper tick alignment
-        keys = list(counts.keys())
-        values = [counts[k] for k in keys]
-        idx = np.arange(len(keys))
-        fig, (ax1, ax2) = plt.subplots(1,2,figsize=(16,6))
-        ax1.bar(idx, values)
-        ax1.set_xticks(idx)
-        ax1.set_xticklabels(keys, rotation=90, fontsize=8)
-        ax1.set_ylabel("Count")
-        ax1.set_title("Amino-Acid Substitution Frequencies")
+            # plot frequencies with proper tick alignment
+            keys = list(counts.keys())
+            values = [counts[k] for k in keys]
+            idx = np.arange(len(keys))
+            fig, (ax1, ax2) = plt.subplots(1,2,figsize=(16,6))
+            ax1.bar(idx, values)
+            ax1.set_xticks(idx)
+            ax1.set_xticklabels(keys, rotation=90, fontsize=8)
+            ax1.set_ylabel("Count")
+            ax1.set_title("Amino-Acid Substitution Frequencies")
 
-        # density/KDE
-        arr = np.array(values, dtype=float)
-        try:
-            kde = gaussian_kde(arr)
-            xmin, xmax = max(1, arr.min()), arr.max()
-            xs = np.logspace(np.log10(xmin), np.log10(xmax), 200)
-            ax2.plot(xs, kde(xs), linewidth=2)
-        except:
-            ax2.hist(arr, bins="auto", density=True, alpha=0.6)
-        ax2.set_xscale("log")
-        ax2.set_xlabel("Substitution Count (log scale)")
-        ax2.set_ylabel("Density")
-        ax2.set_title("KDE of AA Substitution Frequencies")
+            # density/KDE
+            arr = np.array(values, dtype=float)
+            try:
+                kde = gaussian_kde(arr)
+                xmin, xmax = max(1, arr.min()), arr.max()
+                xs = np.logspace(np.log10(xmin), np.log10(xmax), 200)
+                ax2.plot(xs, kde(xs), linewidth=2)
+            except Exception as e:
+                logger.warning(f"KDE plot failed: {e}")
+                ax2.hist(arr, bins="auto", density=True, alpha=0.6)
+            ax2.set_xscale("log")
+            ax2.set_xlabel("Substitution Count (log scale)")
+            ax2.set_ylabel("Density")
+            ax2.set_title("KDE of AA Substitution Frequencies")
 
-        plt.tight_layout()
-        hist_png = os.path.join(out_dir, f"{sample}_aa_substitution_frequency.png")
-        plt.savefig(hist_png)
-        plt.show()
-        plt.close()
-        print(f"  → Saved plot to {hist_png}")
+            plt.tight_layout()
+            hist_png = os.path.join(out_dir, f"{sample}_aa_substitution_frequency.png")
+            plt.savefig(hist_png)
+            plt.show()
+            plt.close()
+            logger.info(f"  → Saved plot to {hist_png}")
+            print(f"  → Saved plot to {hist_png}")
 
-        # prompt threshold after plot
-        thr = int(input(f"Threshold for {base}: "))
-        frequent = {aa for aa,c in counts.items() if c >= thr}
-        print(f"  → {len(frequent)} substitutions ≥ {thr}")
+            thr = int(input(f"Threshold for {base}: "))
+            frequent = {aa for aa,c in counts.items() if c >= thr}
+            logger.info(f"  → {len(frequent)} substitutions ≥ {thr}")
+            print(f"  → {len(frequent)} substitutions ≥ {thr}")
 
-        freq_csv = os.path.join(out_dir, f"{sample}_frequent_aa_counts.csv")
-        pd.DataFrame(
-            [(aa, counts[aa]) for aa in sorted(frequent)],
-            columns=["AA","Count"]
-        ).to_csv(freq_csv, index=False)
-        print(f"  → Saved frequent counts to {freq_csv}")
+            freq_csv = os.path.join(out_dir, f"{sample}_frequent_aa_counts.csv")
+            pd.DataFrame(
+                [(aa, counts[aa]) for aa in sorted(frequent)],
+                columns=["AA","Count"]
+            ).to_csv(freq_csv, index=False)
+            logger.info(f"  → Saved frequent counts to {freq_csv}")
+            print(f"  → Saved frequent counts to {freq_csv}")
 
-        co_base, co_fish = find_cooccurring_aa(subs_aa, frequent, out_dir, sample)
-        print(f"  → Co-occurrence files: {co_base}, {co_fish}")
+            co_base, co_fish = find_cooccurring_aa(subs_aa, frequent, out_dir, sample)
+            logger.info(f"  → Co-occurrence files: {co_base}, {co_fish}")
+            print(f"  → Co-occurrence files: {co_base}, {co_fish}")
 
-        report_path = os.path.join(out_dir, f"{sample}_report.txt")
-        with open(report_path, "w") as rpt:
-            rpt.write(f"Sample: {sample}\n")
-            rpt.write(f"Valid gene reads: {n_reads}\n")
-            rpt.write(f"Unique AA substitutions: {len(counts)}\n")
-            rpt.write(f"User threshold: {thr}\n")
-            rpt.write(f"Frequent AA substitutions (≥ {thr}): {len(frequent)}\n\n")
-            rpt.write("Frequent AA counts:\n")
-            rpt.write("AA\tCount\n")
-            for aa in sorted(frequent):
-                rpt.write(f"{aa}\t{counts[aa]}\n")
-            rpt.write("\nGenerated files:\n")
-            rpt.write(f"- Plot: {os.path.basename(hist_png)}\n")
-            rpt.write(f"- Frequent counts: {os.path.basename(freq_csv)}\n")
-            rpt.write(f"- Co-occurrence baseline: {co_base}\n")
-            rpt.write(f"- Co-occurrence fisher:   {co_fish}\n")
-        print(f"  → Report written to {report_path}")
+            report_path = os.path.join(out_dir, f"{sample}_report.txt")
+            with open(report_path, "w") as rpt:
+                rpt.write(f"Sample: {sample}\n")
+                rpt.write(f"Valid gene reads: {n_reads}\n")
+                rpt.write(f"Unique AA substitutions: {len(counts)}\n")
+                rpt.write(f"User threshold: {thr}\n")
+                rpt.write(f"Frequent AA substitutions (≥ {thr}): {len(frequent)}\n\n")
+                rpt.write("Frequent AA counts:\n")
+                rpt.write("AA\tCount\n")
+                for aa in sorted(frequent):
+                    rpt.write(f"{aa}\t{counts[aa]}\n")
+                rpt.write("\nGenerated files:\n")
+                rpt.write(f"- Plot: {os.path.basename(hist_png)}\n")
+                rpt.write(f"- Frequent counts: {os.path.basename(freq_csv)}\n")
+                rpt.write(f"- Co-occurrence baseline: {co_base}\n")
+                rpt.write(f"- Co-occurrence fisher:   {co_fish}\n")
+            logger.info(f"  → Report written to {report_path}")
+            print(f"  → Report written to {report_path}")
 
-    print("\nAll FASTQ files processed.")
+        logger.info("All FASTQ files processed.")
+        print("\nAll FASTQ files processed.")
+    except Exception as e:
+        logger.exception(f"Fatal error in mutation caller: {e}")
+        print(f"Error: {e}")
 
 if __name__ == "__main__":
     main()

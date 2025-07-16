@@ -1,5 +1,6 @@
 import re
 import csv
+import logging
 from Bio import SeqIO
 from Bio.Seq import Seq
 from Bio.SeqUtils import MeltingTemp as mt
@@ -182,97 +183,123 @@ def design_short_forward(full_seq, lr_end):
 # Main workflow
 # -----------------------------------------
 def main():
-    # Load gene and context sequences from FASTA
-    gene = str(next(SeqIO.parse("data/design_slim/slim_template_gene.fasta", "fasta")).seq).upper()
-    context = str(next(SeqIO.parse("data/design_slim/slim_context.fasta", "fasta")).seq).upper()
-
-    # Load mutations from CSV
-    df = pd.read_csv("data/design_slim/slim_target_mutations.csv")
-    mutations = df["mutations"].dropna().tolist()
-
-    # Align gene within context
+    # Setup logging
+    log_dir = "results/design_slim"
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, "design_slim.log")
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s: %(message)s",
+        handlers=[logging.FileHandler(log_file, mode='w'), logging.StreamHandler()]
+    )
+    logger = logging.getLogger("design_slim")
+    logger.info("Starting SLIM primer design run.")
     try:
-        gene_offset = context.index(gene)
-    except ValueError:
-        raise ValueError("Could not align gene within context. No perfect substring match found.")
-    full_seq = context
-    gene_len = len(gene)
+        # Load gene and context sequences from FASTA
+        gene = str(next(SeqIO.parse("data/design_slim/slim_template_gene.fasta", "fasta")).seq).upper()
+        context = str(next(SeqIO.parse("data/design_slim/slim_context.fasta", "fasta")).seq).upper()
+        logger.info(f"Loaded gene and context sequences. Gene length: {len(gene)}, Context length: {len(context)}")
 
-    os.makedirs("results", exist_ok=True)
-    with open("results/design_slim/SLIM_primers.csv", "w", newline="") as csvfile:
-        writer = csv.writer(csvfile)
-        writer.writerow(["Primer Name", "Sequence"])
+        # Load mutations from CSV
+        df = pd.read_csv("data/design_slim/slim_target_mutations.csv")
+        mutations = df["mutations"].dropna().tolist()
+        logger.info(f"Loaded {len(mutations)} mutation entries from CSV.")
 
-        for mutation in mutations:
-            # Parse mutation according to nomenclature:
-            # Substitution:        A123G
-            # Deletion:            T241Del
-            # InDel (inter-codon): T241InDelA242S
-            # Insertion after codon: T241TS (insert Ser after Thr241)
-            # Codon replacement insertion: L46GP (replace Leu46 with Gly-Pro)
-            m = mutation
-            m_del   = re.match(r'^([A-Z])(\d+)Del$', m)
-            m_indel = re.match(r'^([A-Z])(\d+)InDel([A-Z])(\d+)([A-Z]+)$', m)
-            m_sub   = re.match(r'^([A-Z])(\d+)([A-Z])$', m)
-            m_ins   = re.match(r'^([A-Z])(\d+)([A-Z]{2,})$', m)
+        # Align gene within context
+        try:
+            gene_offset = context.index(gene)
+            logger.info(f"Gene aligned at offset {gene_offset} in context.")
+        except ValueError:
+            logger.error("Could not align gene within context. No perfect substring match found.")
+            raise ValueError("Could not align gene within context. No perfect substring match found.")
+        full_seq = context
+        gene_len = len(gene)
 
-            if m_del:
-                wt_aa, pos1 = m_del.group(1), int(m_del.group(2))
-                region_start = gene_offset + (pos1 - 1) * 3
-                old_len = 3
-                new_seq = ''
-            elif m_indel:
-                wt1, pos1, wt2, pos2, ins_aa = m_indel.groups()
-                pos1, pos2 = int(pos1), int(pos2)
-                region_start = gene_offset + (pos1 - 1) * 3
-                old_len = (pos2 - pos1 + 1) * 3
-                wt_codon = full_seq[region_start:region_start+3]
-                new_seq = ''.join(pick_mutant_codon(wt_codon, aa) or '' for aa in ins_aa)
-            elif m_ins:
-                wt_aa, pos1_s, ins_str = m_ins.groups()
-                pos1 = int(pos1_s)
-                codon_start_old = gene_offset + (pos1 - 1) * 3
-                # determine if this is insertion after codon or replacement
-                if ins_str[0] == wt_aa:
-                    # insertion after codon: first letter = original aa
-                    inserted_aas = ins_str[1:]
-                    region_start = codon_start_old + 3
-                    old_len = 0
-                else:
-                    # codon replacement insertion: replace original codon
-                    inserted_aas = ins_str
-                    region_start = codon_start_old
-                    old_len = 3
-                wt_codon = full_seq[codon_start_old:codon_start_old+3]
-                new_seq = ''.join(
-                    pick_mutant_codon(wt_codon, aa) or '' for aa in inserted_aas
-                )
-            elif m_sub:
-                wt_aa, pos1, mut_aa = m_sub.group(1), int(m_sub.group(2)), m_sub.group(3)
-                region_start = gene_offset + (pos1 - 1) * 3
-                old_len = 3
-                wt_codon = full_seq[region_start:region_start+3]
-                if translate_codon(wt_codon) != wt_aa:
-                    raise ValueError(f"For {mutation}: expected {wt_aa}, found {translate_codon(wt_codon)} at {wt_codon}")
-                new_seq = pick_mutant_codon(wt_codon, mut_aa)
-                if not new_seq:
-                    raise ValueError(f"No minimal-change codon for {wt_aa}->{mut_aa}")
-            else:
-                raise ValueError(f"Unknown mutation format: {mutation}")
+        os.makedirs("results/design_slim", exist_ok=True)
+        with open("results/design_slim/SLIM_primers.csv", "w", newline="") as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(["Primer Name", "Sequence"])
 
-            # Design primers
-            lf_seq, lf_start, lf_end = design_long_forward(full_seq, region_start, old_len, new_seq)
-            lr_seq, lr_start, lr_end = design_long_reverse(full_seq, region_start, old_len, new_seq)
-            sr_seq = design_short_reverse(full_seq, lf_start)
-            sf_seq = design_short_forward(full_seq, lr_end)
+            for mutation in mutations:
+                try:
+                    m = mutation
+                    m_del   = re.match(r'^([A-Z])(\d+)Del$', m)
+                    m_indel = re.match(r'^([A-Z])(\d+)InDel([A-Z])(\d+)([A-Z]+)$', m)
+                    m_sub   = re.match(r'^([A-Z])(\d+)([A-Z])$', m)
+                    m_ins   = re.match(r'^([A-Z])(\d+)([A-Z]{2,})$', m)
 
-            # Output
-            writer.writerow([mutation + '_Lf', lf_seq])
-            writer.writerow([mutation + '_Sr', sr_seq])
-            writer.writerow([mutation + '_Lr', lr_seq])
-            writer.writerow([mutation + '_Sf', sf_seq])
+                    if m_del:
+                        wt_aa, pos1 = m_del.group(1), int(m_del.group(2))
+                        region_start = gene_offset + (pos1 - 1) * 3
+                        old_len = 3
+                        new_seq = ""
+                    elif m_indel:
+                        wt1, pos1_s, wt2, pos2_s, ins_aa = m_indel.groups()
+                        pos1, pos2 = int(pos1_s), int(pos2_s)
+                        region_start = gene_offset + (pos1 - 1) * 3
+                        old_len = (pos2 - pos1 + 1) * 3
+                        wt_codon = full_seq[region_start:region_start+3]
+                        new_seq = ""
+                        for aa in ins_aa:
+                            codon = pick_mutant_codon(wt_codon, aa)
+                            if not codon:
+                                logger.error(f"No codon found for {wt1}->{ins_aa}")
+                                raise ValueError(f"No codon found for {wt1}->{ins_aa}")
+                            new_seq += codon
+                    elif m_ins:
+                        wt_aa, pos1_s, ins_str = m_ins.groups()
+                        pos1 = int(pos1_s)
+                        codon_start_old = gene_offset + (pos1 - 1) * 3
+                        wt_codon = full_seq[codon_start_old:codon_start_old+3]
+                        if ins_str[0] == wt_aa:
+                            inserted_aas = ins_str[1:]
+                            region_start = codon_start_old + 3
+                            old_len = 0
+                        else:
+                            inserted_aas = ins_str
+                            region_start = codon_start_old
+                            old_len = 3
+                        new_seq = ""
+                        for aa in inserted_aas:
+                            codon = pick_mutant_codon(wt_codon, aa)
+                            if not codon:
+                                logger.error(f"No codon for insertion AA {aa}")
+                                raise ValueError(f"No codon for insertion AA {aa}")
+                            new_seq += codon
+                    elif m_sub:
+                        wt_aa, pos1, mut_aa = m_sub.group(1), int(m_sub.group(2)), m_sub.group(3)
+                        region_start = gene_offset + (pos1 - 1) * 3
+                        old_len = 3
+                        wt_codon = full_seq[region_start:region_start+3]
+                        if translate_codon(wt_codon) != wt_aa:
+                            logger.error(f"For {mutation}: expected {wt_aa}, found {translate_codon(wt_codon)} at {wt_codon}")
+                            raise ValueError(f"For {mutation}: expected {wt_aa}, found {translate_codon(wt_codon)} at {wt_codon}")
+                        new_seq = pick_mutant_codon(wt_codon, mut_aa)
+                        if not new_seq:
+                            logger.error(f"No minimal-change codon for {wt_aa}->{mut_aa}")
+                            raise ValueError(f"No minimal-change codon for {wt_aa}->{mut_aa}")
+                    else:
+                        logger.error(f"Unknown mutation format: {mutation}")
+                        raise ValueError(f"Unknown mutation format: {mutation}")
 
-    print("results/design_slim/SLIM_primers.csv created successfully.")
+                    lf_seq, lf_start, lf_end = design_long_forward(full_seq, region_start, old_len, new_seq)
+                    lr_seq, lr_start, lr_end = design_long_reverse(full_seq, region_start, old_len, new_seq)
+                    sr_seq = design_short_reverse(full_seq, lf_start)
+                    sf_seq = design_short_forward(full_seq, lr_end)
+
+                    writer.writerow([mutation + '_Lf', lf_seq])
+                    writer.writerow([mutation + '_Sr', sr_seq])
+                    writer.writerow([mutation + '_Lr', lr_seq])
+                    writer.writerow([mutation + '_Sf', sf_seq])
+                    logger.info(f"Designed primers for {mutation}")
+                except Exception as e:
+                    logger.error(f"Error processing mutation {mutation}: {e}")
+                    raise
+        print("results/design_slim/SLIM_primers.csv created successfully.")
+        logger.info("SLIM primer design run completed successfully.")
+    except Exception as e:
+        logger.exception(f"Fatal error in SLIM primer design: {e}")
+        print(f"Error: {e}")
 
 if __name__ == "__main__":
     main()

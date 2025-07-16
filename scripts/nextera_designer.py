@@ -1,6 +1,8 @@
 import csv
 import yaml
 import pandas as pd
+import os
+import logging
 
 
 ##### INPUT: In /data/nextera_designer/, place a file called nextera_designer.csv, that has the template binding sequences in the first column, which should be named binding_region. These should be the PCR primers you intend to use. Then run this script ######
@@ -69,18 +71,36 @@ def generate_primers():
     return primers
 
 def main():
-    with open("configs/config.yaml", "r") as f:
-        config = yaml.safe_load(f)
+    # Setup logging
+    log_dir = "results/nextera_designer"
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, "nextera_designer.log")
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s: %(message)s",
+        handlers=[logging.FileHandler(log_file, mode='w'), logging.StreamHandler()]
+    )
+    logger = logging.getLogger("nextera_designer")
+    logger.info("Starting Nextera primer design run.")
+    try:
+        with open("configs/config.yaml", "r") as f:
+            config = yaml.safe_load(f)
+        logger.info("Loaded config.yaml.")
 
-    primers = generate_primers()
+        primers = generate_primers()
+        logger.info(f"Generated {len(primers)} primers.")
 
-    with open(OUTPUT_FILE, mode="w", newline="") as file:
-        writer = csv.writer(file)
-        writer.writerow(["primer_name", "sequence"])  # header
-        for name, seq in primers:
-            writer.writerow([name, seq])
-
-    print(f"Saved {len(primers)} primers to {OUTPUT_FILE}")
+        with open(OUTPUT_FILE, mode="w", newline="") as file:
+            writer = csv.writer(file)
+            writer.writerow(["primer_name", "sequence"])  # header
+            for name, seq in primers:
+                writer.writerow([name, seq])
+        logger.info(f"Wrote primers to {OUTPUT_FILE}")
+        print(f"Saved {len(primers)} primers to {OUTPUT_FILE}")
+        logger.info("Nextera primer design run completed successfully.")
+    except Exception as e:
+        logger.exception(f"Fatal error in Nextera primer design: {e}")
+        print(f"Error: {e}")
 
 if __name__ == "__main__":
     main()
