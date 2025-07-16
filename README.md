@@ -22,6 +22,8 @@ Please note, this setup.sh file is verified for Mac only. Results may vary on ot
 
 This code is set up do that configs and data are found in data/.../, where ... depends on the script that you care to run. Likewise, results are saved to results/.../
 
+**All major scripts now generate detailed log files in their respective results/.../ directories. These logs capture all major steps, errors, and outputs, making it easier to debug and trace your runs.**
+
 The currently available commands are: 
 
 	make nextera_primers
@@ -161,7 +163,6 @@ These will be saved in results/ep-library-profile/, along with the log file. Not
 Coming soon: 
 
 - Primer design for KLD cloning of mutants
-- Detailed log files for all scripts
 - Expansion of all primer design software for multi-mutations
 - Expansion of mutation caller to handle indels
 
