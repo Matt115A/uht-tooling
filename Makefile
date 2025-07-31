@@ -9,9 +9,9 @@ MUTATION_CALLER=scripts/mutation_caller.py
 
 # Rules
 
-.PHONY: all nextera_primers umi_hunter design_slim mutation_caller
+.PHONY: all nextera_primers umi_hunter design_slim mutation_caller profile_inserts
 
-all: nextera_primers umi_hunter design_slim mutation_caller
+all: nextera_primers umi_hunter design_slim mutation_caller profile_inserts
 
 nextera_primers:
 	python -m scripts.nextera_designer
@@ -30,6 +30,9 @@ ep-library-profile:
 
 design_gibson:
 	python -m scripts.design_gibson
+
+profile_inserts:
+	python -m scripts.profile_inserts
 
 clean:
 	rm -rf results/*.png

@@ -38,6 +38,7 @@ chmod +x setup.sh
 - `make mutation_caller`
 - `make ep-library-profile`
 - `make design_gibson`
+- `make profile_inserts`
 
 ---
 
@@ -55,6 +56,25 @@ To use this software:
 - PCR using an i5/i7 primer pair, monitor a portion of the reaction using qPCR. Cap the cycle number to get only 10% of the final yield (minimises PCR amplification bias).
 - Purify the DNA product, removing primers (important to avoid primer excess on the chip). Use SPRIselect beads from Beckman Coulter. Start with a 0.65:1 bead:DNA volume ratio.
 - Verify primer removal using electrophoresis (e.g., 2100 BioAnalyser and a DNA detection chip).
+
+---
+
+## Profile Inserts: Analyzing Insert Sequences from FASTQ Data
+
+Extract and analyze insert sequences from FASTQ data using upstream and downstream probe sequences:
+
+- Place your `.fastq.gz` file and a `.csv` file with `upstream` and `downstream` columns in `data/profile_inserts/`.
+- Run `make profile_inserts`.
+- The script uses fuzzy matching to find probe sequences (forward and reverse complement).
+- Outputs include extracted inserts in FASTA format, comprehensive QC plots, and detailed metrics.
+- QC metrics include length distribution, GC content, sequence composition, probe performance, and duplicate analysis.
+
+**Features:**
+- Fuzzy matching for probe annealing (configurable threshold)
+- Progress bars for long-running analyses
+- Comprehensive QC plots (12 different visualizations)
+- Detailed logging and error handling
+- Support for multiple probe pairs per CSV
 
 ---
 

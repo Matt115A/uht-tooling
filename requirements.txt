@@ -5,3 +5,6 @@ biopython
 matplotlib
 pysam
 scipy
+fuzzywuzzy
+python-Levenshtein
+seaborn
