@@ -119,10 +119,15 @@ def extract_inserts(fastq_path, probes, min_ratio=80):
                     upstream_positions = find_probe_positions(seq, probe['upstream'], min_ratio)
                     downstream_positions = find_probe_positions(seq, probe['downstream'], min_ratio)
                     
+                    total_combinations = len(upstream_positions) * len(downstream_positions)
+                    proper_orientation_count = 0
+                    
                     for up_start, up_end, up_ratio, up_strand in upstream_positions:
                         for down_start, down_end, down_ratio, down_strand in downstream_positions:
-                            # Ensure downstream comes after upstream
-                            if down_start > up_end:
+                            # Only extract if both probes are in forward strand (5'→3' direction)
+                            # and downstream comes after upstream
+                            if (up_strand == 'forward' and down_strand == 'forward' and 
+                                down_start > up_end):
                                 insert_seq = seq[up_end:down_start]
                                 if len(insert_seq) > 0:
                                     inserts.append({
@@ -136,6 +141,10 @@ def extract_inserts(fastq_path, probes, min_ratio=80):
                                         'read_id': header.strip()[1:]
                                     })
                                     matched_reads += 1
+                                    proper_orientation_count += 1
+                    
+                    if total_combinations > 0:
+                        logger.debug(f"Probe pair {probe['name']}: {proper_orientation_count}/{total_combinations} combinations had proper orientation")
     
     logger.info(f"Extracted {len(inserts)} inserts from {matched_reads} matched reads")
     return inserts
