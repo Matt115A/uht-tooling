@@ -10,14 +10,14 @@ https://docs.conda.io/projects/conda/en/latest/user-guide/install/index.html
 Clone the repo into a directory of your choice:
 
 ```bash
-git clone https://github.com/Matt115A/uht-tooling.git
+	git clone https://github.com/Matt115A/uht-tooling.git
 ```
 
 Navigate to `/uht-tooling/` and run:
 
 ```bash
-chmod +x setup.sh
-./setup.sh
+	chmod +x setup.sh
+	./setup.sh
 ```
 
 *Note: This setup.sh file is verified for Mac only. Results may vary on other OS.*

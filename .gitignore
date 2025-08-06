@@ -1,13 +1,38 @@
+# Data and results directories (to avoid committing DNA files)
 data/design_gibson/
 data/design_slim/
 data/ep-library-profile/
 data/mutation_caller/
 data/nextera_designer/
 data/umi_hunter/
+data/profile_inserts/
+data/profileinserts/
 results/design_gibson/
 results/design_slim/
 results/ep-library-profile/
 results/mutation_caller/
 results/nextera_designer/
 results/umi_hunter/
+results/profile_inserts/
+
+# System files
+.DS_Store
+**/.DS_Store
+
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Log files
+*.log
 
