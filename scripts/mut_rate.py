@@ -21,7 +21,7 @@ plt.style.use("ggplot")
 
 # Try to import scipy for Z‐test p‐value and KDE
 try:
-    from scipy.stats import norm, gaussian_kde
+    from scipy.stats import norm, gaussian_kde, beta, binom
     HAVE_SCIPY = True
 except ImportError:
     HAVE_SCIPY = False
@@ -298,7 +298,7 @@ def z_test_two_proportions(mis1, cov1, mis2, cov2):
 
 def run_nanofilt_filtering(input_fastq, quality_threshold, output_fastq):
     """
-    Run NanoFilt to filter FASTQ file by quality score threshold.
+    Run NanoFilt to filter FASTQ file by quality score threshold and minimum length.
     
     Args:
         input_fastq: Path to input FASTQ.gz file
@@ -309,9 +309,9 @@ def run_nanofilt_filtering(input_fastq, quality_threshold, output_fastq):
         bool: True if successful, False otherwise
     """
     try:
-        # Use gunzip to decompress, pipe to NanoFilt, then compress output
-        cmd = f"gunzip -c {input_fastq} | NanoFilt -q {quality_threshold} | gzip > {output_fastq}"
-        logging.info(f"Running NanoFilt with quality threshold {quality_threshold}: {cmd}")
+        # Use gunzip to decompress, pipe to NanoFilt with length filter, then compress output
+        cmd = f"gunzip -c {input_fastq} | NanoFilt -q {quality_threshold} -l 30 | gzip > {output_fastq}"
+        logging.info(f"Running NanoFilt with quality threshold {quality_threshold} and min length 30bp: {cmd}")
         
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
         if result.returncode != 0:
@@ -332,7 +332,7 @@ def run_nanofilt_filtering(input_fastq, quality_threshold, output_fastq):
 
 def calculate_mutation_rate_for_quality(fastq_path, quality_threshold, work_dir, ref_hit_fasta, plasmid_fasta):
     """
-    Calculate mutation rate and AA mutations per gene for a specific quality threshold.
+    Calculate comprehensive AA mutation analysis for a specific quality threshold.
     
     Args:
         fastq_path: Path to input FASTQ.gz file
@@ -342,14 +342,14 @@ def calculate_mutation_rate_for_quality(fastq_path, quality_threshold, work_dir,
         plasmid_fasta: Path to plasmid FASTA
     
     Returns:
-        tuple: (aa_mutations_per_gene, mappable_reads, success_flag) or (None, None, False) if failed
+        dict: Comprehensive results with error estimates or None if failed
     """
     try:
         # Create filtered FASTQ file
         filtered_fastq = os.path.join(work_dir, f"filtered_q{quality_threshold}.fastq.gz")
         
         if not run_nanofilt_filtering(fastq_path, quality_threshold, filtered_fastq):
-            return None, None, False
+            return None
         
         # Load sequences
         hit_seq, hit_id = load_single_sequence(ref_hit_fasta)
@@ -359,7 +359,7 @@ def calculate_mutation_rate_for_quality(fastq_path, quality_threshold, work_dir,
         idx = plasmid_seq.upper().find(hit_seq.upper())
         if idx == -1:
             logging.error("Gene region not found in plasmid")
-            return None, None, False
+            return None
         
         # Align filtered reads to hit region
         sam_hit = run_minimap2(filtered_fastq, ref_hit_fasta, f"hit_q{quality_threshold}", work_dir)
@@ -369,20 +369,16 @@ def calculate_mutation_rate_for_quality(fastq_path, quality_threshold, work_dir,
         
         # Calculate background rate from full plasmid alignment, excluding target region
         bg_mis, bg_cov, bg_reads = calculate_background_from_plasmid(sam_plasmid, plasmid_seq, idx, len(hit_seq))
-        bg_rate = (bg_mis / bg_cov) if bg_cov else 0.0
         
         # Calculate hit region mutation rate
         mismatch_hit = compute_mismatch_stats_sam(sam_hit, {hit_id: hit_seq})
         hit_info = mismatch_hit[hit_id]
-        hit_rate = hit_info["avg_mismatch_rate"]
-        mappable_reads = hit_info["mapped_reads"]
+        hit_mis = hit_info["total_mismatches"]
+        hit_cov = hit_info["total_covered_bases"]
         
-        # Calculate net mutation rate (hit - background)
-        net_mutation_rate = max(hit_rate - bg_rate, 0.0)
-        
-        # Calculate estimated mutations per target copy (basepairs) - same as in main analysis
-        length_of_target = len(hit_seq)
-        est_mut_per_copy = max(net_mutation_rate * length_of_target, 0.0)
+        # Extract Q-score statistics for both hit and background regions
+        hit_qscore_stats = extract_qscores_from_sam(sam_hit)
+        bg_qscore_stats = extract_qscores_from_sam(sam_plasmid)
         
         # Check if it's a protein-coding sequence
         is_protein = True
@@ -392,76 +388,529 @@ def calculate_mutation_rate_for_quality(fastq_path, quality_threshold, work_dir,
         elif "*" in str(Seq(seq_upper).translate(to_stop=False))[:-1]:
             is_protein = False
         
-        # Calculate AA mutations per gene using Poisson simulation (same as main analysis)
+        # Run comprehensive analysis if protein-coding
         if is_protein:
-            aa_diffs = simulate_aa_distribution(est_mut_per_copy, hit_seq, n_trials=1000)
-            avg_aa_mutations = sum(aa_diffs) / len(aa_diffs)
+            results = comprehensive_aa_mutation_analysis(
+                hit_mis, hit_cov, bg_mis, bg_cov, hit_seq, 
+                quality_threshold=quality_threshold, n_trials=10000,
+                hit_qscore_stats=hit_qscore_stats, bg_qscore_stats=bg_qscore_stats,
+                sam_hit=sam_hit, sam_plasmid=sam_plasmid, hit_seq=hit_seq, plasmid_seq=plasmid_seq
+            )
+            return results
         else:
-            avg_aa_mutations = 0.0
-        
-        logging.info(f"Quality {quality_threshold}: aa_mutations_per_gene={avg_aa_mutations:.4f}, "
-                    f"mappable_reads={mappable_reads}, hit_rate={hit_rate:.6f}, bg_rate={bg_rate:.6f}")
-        
-        return avg_aa_mutations, mappable_reads, True
+            # For non-protein sequences, return basic info
+            return {
+                'mean_aa_mutations': 0.0,
+                'std_aa_mutations': 0.0,
+                'ci_lower': 0.0,
+                'ci_upper': 0.0,
+                'hit_rate': hit_mis / hit_cov if hit_cov > 0 else 0,
+                'bg_rate': bg_mis / bg_cov if bg_cov > 0 else 0,
+                'net_rate': max((hit_mis / hit_cov) - (bg_mis / bg_cov), 0) if hit_cov > 0 and bg_cov > 0 else 0,
+                'mappable_bases': hit_cov,
+                'quality_threshold': quality_threshold,
+                'is_protein': False
+            }
         
     except Exception as e:
         logging.error(f"Error calculating mutation rate for quality {quality_threshold}: {e}")
-        return None, None, False
+        return None
+
+def find_optimal_qscore(qc_results):
+    """
+    Find the Q-score threshold with the lowest net mutation rate error.
+    
+    Args:
+        qc_results: List of comprehensive analysis results
+    
+    Returns:
+        tuple: (optimal_qscore, optimal_result, error_comparison)
+    """
+    logging.info("=== FINDING OPTIMAL Q-SCORE THRESHOLD ===")
+    
+    if not qc_results:
+        return None, None, None
+    
+    # Find Q-score with minimum net mutation rate error
+    min_error = float('inf')
+    optimal_result = None
+    optimal_qscore = None
+    
+    error_comparison = []
+    
+    for result in qc_results:
+        qscore = result['quality_threshold']
+        # Use weighted error for optimal Q-score selection
+        net_rate_error = result.get('net_weighted_error', result['net_rate_error'])
+        mappable_bases = result['mappable_bases']
+        
+        error_comparison.append({
+            'qscore': qscore,
+            'net_rate_error': net_rate_error,
+            'net_weighted_error': result.get('net_weighted_error', 0.0),
+            'mappable_bases': mappable_bases,
+            'aa_mutations': result['mean_aa_mutations'],
+            'aa_error': result['std_aa_mutations']
+        })
+        
+        logging.info(f"Q{qscore}: net_weighted_error={net_rate_error:.6f}, mappable_bases={mappable_bases}")
+        
+        if net_rate_error < min_error:
+            min_error = net_rate_error
+            optimal_result = result
+            optimal_qscore = qscore
+    
+    logging.info(f"OPTIMAL Q-SCORE: Q{optimal_qscore} (lowest net mutation rate error: {min_error:.6f})")
+    logging.info(f"Optimal result: AA mutations = {optimal_result['mean_aa_mutations']:.4f} ± {optimal_result['std_aa_mutations']:.4f}")
+    
+    return optimal_qscore, optimal_result, error_comparison
 
 def run_qc_analysis(fastq_path, results_dir):
     """
-    Run QC analysis by testing different quality score thresholds and plotting results.
+    Run simple QC analysis using segmentation-based error estimation.
     
     Args:
         fastq_path: Path to input FASTQ.gz file
         results_dir: Directory to save QC results
     """
-    logging.info("Starting QC analysis with quality score filtering")
+    logging.info("Starting simple QC analysis with segmentation-based error estimation")
     
-    # Define quality thresholds to test (15 filters)
-    quality_thresholds = [5, 7, 10, 12, 15, 17, 20, 22, 25, 27, 30, 32, 35, 37, 40]
+    # Define quality thresholds to test
+    quality_thresholds = [16, 18, 20, 22, 24, 26]
     
     # Paths to reference files
     ref_hit_fasta = os.path.join(DATA_DIR, "region_of_interest.fasta")
     plasmid_fasta = os.path.join(DATA_DIR, "plasmid.fasta")
     
+    # Segment the input FASTQ file
+    logging.info("Segmenting FASTQ file into 10 parts for error estimation...")
+    segment_files = segment_fastq_file(fastq_path, n_segments=10)
+    
+    if not segment_files:
+        logging.error("Failed to segment FASTQ file")
+        return
+    
     # Create temporary work directory for QC analysis
     with tempfile.TemporaryDirectory() as qc_work_dir:
         logging.info(f"Using temporary work directory: {qc_work_dir}")
         
-        # Calculate mutation rates and mappable reads for each quality threshold
-        aa_mutations = []
-        mappable_reads = []
+        # Calculate results for each quality threshold
+        qc_results = []
         successful_thresholds = []
         
         for q_threshold in quality_thresholds:
             logging.info(f"Processing quality threshold: {q_threshold}")
-            aa_mut, reads, success = calculate_mutation_rate_for_quality(
-                fastq_path, q_threshold, qc_work_dir, ref_hit_fasta, plasmid_fasta
+            result = run_segmented_analysis(
+                segment_files, q_threshold, qc_work_dir, ref_hit_fasta, plasmid_fasta
             )
             
-            if success and aa_mut is not None and reads is not None:
-                aa_mutations.append(aa_mut)
-                mappable_reads.append(reads)
+            if result is not None:
+                qc_results.append(result)
                 successful_thresholds.append(q_threshold)
-                logging.info(f"Quality {q_threshold}: AA mutations per gene = {aa_mut:.4f}, mappable reads = {reads}")
+                logging.info(f"Quality {q_threshold}: AA mutations = {result['mean_aa_mutations']:.4f} ± {result['std_aa_mutations']:.4f}, "
+                           f"mappable bases = {result['total_mappable_bases']}")
             else:
                 logging.warning(f"Failed to calculate mutation rate for quality threshold {q_threshold}")
         
-        # Create QC plot if we have at least 2 data points
-        if len(aa_mutations) >= 2:
-            create_qc_plot(successful_thresholds, aa_mutations, mappable_reads, results_dir)
+        # Find optimal Q-score threshold (lowest empirical error)
+        optimal_qscore, optimal_result = find_optimal_qscore_simple(qc_results)
+        
+        # Create QC plots
+        if len(qc_results) >= 2:
+            create_simple_qc_plots(successful_thresholds, qc_results, results_dir, optimal_qscore, optimal_result)
         else:
-            logging.warning("Insufficient data points for QC plot (need at least 2)")
+            logging.warning("Insufficient data points for QC plots (need at least 2)")
+        
+        # Save optimal Q-score information
+        if optimal_qscore is not None:
+            optimal_qscore_path = os.path.join(results_dir, "optimal_qscore_analysis.txt")
+            with open(optimal_qscore_path, 'w') as f:
+                f.write("=== OPTIMAL Q-SCORE ANALYSIS (PRECISION-WEIGHTED) ===\n")
+                f.write(f"Optimal Q-score threshold: {optimal_qscore}\n")
+                f.write(f"Precision-weighted score: {(1.0 / optimal_result['std_aa_mutations']) * optimal_qscore:.6f}\n")
+                f.write(f"Empirical error (std): {optimal_result['std_aa_mutations']:.6f}\n")
+                f.write(f"AA mutations per gene: {optimal_result['mean_aa_mutations']:.4f} ± {optimal_result['std_aa_mutations']:.4f}\n")
+                f.write(f"95% Confidence Interval: [{optimal_result['ci_lower']:.4f}, {optimal_result['ci_upper']:.4f}]\n")
+                f.write(f"Total mappable bases: {optimal_result['total_mappable_bases']}\n")
+                f.write(f"Number of segments: {optimal_result['n_segments']}\n")
+                f.write("\n=== ALL Q-SCORE COMPARISON ===\n")
+                f.write("Q-score\tEmpirical_Error\tPrecision_Score\tMappable_Bases\tAA_Mutations\tCI_Lower\tCI_Upper\n")
+                for result in qc_results:
+                    precision_score = (1.0 / result['std_aa_mutations']) * result['quality_threshold'] if result['std_aa_mutations'] > 0 else float('inf')
+                    f.write(f"{result['quality_threshold']}\t{result['std_aa_mutations']:.6f}\t{precision_score:.6f}\t{result['total_mappable_bases']}\t{result['mean_aa_mutations']:.4f}\t{result['ci_lower']:.4f}\t{result['ci_upper']:.4f}\n")
+            
+            logging.info(f"Optimal Q-score analysis saved to: {optimal_qscore_path}")
+        
+        # Clean up segment files
+        import shutil
+        segment_dir = os.path.dirname(segment_files[0])
+        if os.path.exists(segment_dir):
+            shutil.rmtree(segment_dir)
+            logging.info(f"Cleaned up segment directory: {segment_dir}")
+        
+        # Return the optimal Q-score for use in main analysis
+        return optimal_qscore
 
-def create_qc_plot(quality_thresholds, aa_mutations, mappable_reads, results_dir):
+def find_optimal_qscore_simple(qc_results):
     """
-    Create a dual-axis plot showing quality score threshold vs AA mutations per gene and mappable reads.
+    Find the Q-score threshold with the highest precision-weighted score.
+    Precision-weighted score = (1 / standard_deviation) * q_score
+    
+    Args:
+        qc_results: List of segmentation analysis results
+    
+    Returns:
+        tuple: (optimal_qscore, optimal_result)
+    """
+    logging.info("=== FINDING OPTIMAL Q-SCORE THRESHOLD (PRECISION-WEIGHTED) ===")
+    
+    if not qc_results:
+        return None, None
+    
+    # Find Q-score with highest precision-weighted score
+    max_score = -1
+    optimal_result = None
+    optimal_qscore = None
+    
+    logging.info("Q-score\tEmpirical_Error\tPrecision_Score\tMappable_Bases")
+    logging.info("-" * 60)
+    
+    for result in qc_results:
+        qscore = result['quality_threshold']
+        empirical_error = result['std_aa_mutations']
+        mappable_bases = result['total_mappable_bases']
+        
+        # Calculate precision-weighted score: (1/sd) * q_score
+        if empirical_error > 0:
+            precision_score = (1.0 / empirical_error) * qscore
+        else:
+            precision_score = float('inf')  # Perfect precision
+        
+        logging.info(f"Q{qscore}\t{empirical_error:.6f}\t{precision_score:.6f}\t{mappable_bases}")
+        
+        if precision_score > max_score:
+            max_score = precision_score
+            optimal_result = result
+            optimal_qscore = qscore
+    
+    logging.info("-" * 60)
+    logging.info(f"OPTIMAL Q-SCORE: Q{optimal_qscore} (highest precision-weighted score: {max_score:.6f})")
+    logging.info(f"Optimal result: AA mutations = {optimal_result['mean_aa_mutations']:.4f} ± {optimal_result['std_aa_mutations']:.4f}")
+    
+    return optimal_qscore, optimal_result
+
+def create_simple_qc_plots(quality_thresholds, qc_results, results_dir, optimal_qscore=None, optimal_result=None):
+    """
+    Create simple QC plots with empirical error bars.
+    
+    Args:
+        quality_thresholds: List of quality score thresholds
+        qc_results: List of segmentation analysis results
+        results_dir: Directory to save the plots
+        optimal_qscore: Optimal Q-score threshold (optional)
+        optimal_result: Optimal result data (optional)
+    """
+    try:
+        # Extract data for plotting
+        aa_mutations = [r['mean_aa_mutations'] for r in qc_results]
+        aa_errors = [r['std_aa_mutations'] for r in qc_results]
+        aa_ci_lower = [r['ci_lower'] for r in qc_results]
+        aa_ci_upper = [r['ci_upper'] for r in qc_results]
+        mappable_bases = [r['total_mappable_bases'] for r in qc_results]
+        
+        # Create main QC plot
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
+        
+        # Top plot: AA mutations per gene with empirical error bars
+        color1 = '#2E8B57'
+        ax1.errorbar(quality_thresholds, aa_mutations, yerr=aa_errors, 
+                    fmt='o', capsize=5, capthick=2, markersize=8, 
+                    color=color1, ecolor=color1, alpha=0.8, label='Mean ± Empirical Std')
+        
+        # Add confidence intervals as shaded area
+        ax1.fill_between(quality_thresholds, aa_ci_lower, aa_ci_upper, 
+                        alpha=0.3, color=color1, label='95% Confidence Interval')
+        
+        # Highlight optimal Q-score
+        if optimal_qscore is not None:
+            ax1.axvline(x=optimal_qscore, color='red', linestyle='--', alpha=0.7, 
+                       label=f'Optimal Q{optimal_qscore}')
+        
+        ax1.set_xlabel('Quality Score Threshold', fontsize=12, fontweight='bold')
+        ax1.set_ylabel('Estimated AA Mutations per Gene', fontsize=12, fontweight='bold', color=color1)
+        ax1.tick_params(axis='y', labelcolor=color1)
+        ax1.set_title('AA Mutations per Gene vs Quality Score Filter (Segmentation-Based Error)', 
+                     fontsize=14, fontweight='bold')
+        ax1.grid(True, alpha=0.3)
+        ax1.legend(frameon=False, fontsize=10)
+        
+        # Add data point labels
+        for i, (q, aa_mut, aa_err) in enumerate(zip(quality_thresholds, aa_mutations, aa_errors)):
+            ax1.annotate(f'Q{q}\n{aa_mut:.3f}±{aa_err:.3f}', 
+                        (q, aa_mut), xytext=(5, 5), 
+                        textcoords='offset points', fontsize=8, alpha=0.8, color=color1)
+        
+        # Bottom plot: Mappable bases and AA mutations per gene
+        color2 = '#FF6B6B'
+        color3 = '#4169E1'
+        
+        # Mappable bases (left y-axis)
+        ax2_twin = ax2.twinx()
+        ax2_twin.scatter(quality_thresholds, mappable_bases, 
+                        s=100, alpha=0.7, color=color2, edgecolors='black', 
+                        linewidth=1, marker='s', label='Mappable Bases')
+        ax2_twin.set_ylabel('Number of Mappable Bases', fontsize=12, fontweight='bold', color=color2)
+        ax2_twin.tick_params(axis='y', labelcolor=color2)
+        
+        # AA mutations per gene with error bars (right y-axis)
+        ax2.errorbar(quality_thresholds, aa_mutations, yerr=aa_errors,
+                    fmt='^', capsize=5, capthick=2, markersize=8,
+                    color=color3, ecolor=color3, alpha=0.8, label='AA Mutations ± Empirical Error')
+        ax2.set_ylabel('Estimated AA Mutations per Gene', fontsize=12, fontweight='bold', color=color3)
+        ax2.tick_params(axis='y', labelcolor=color3)
+        ax2.set_xlabel('Quality Score Threshold', fontsize=12, fontweight='bold')
+        ax2.set_title('Mappable Bases and AA Mutations per Gene vs Quality Score Filter', 
+                     fontsize=14, fontweight='bold')
+        ax2.grid(True, alpha=0.3)
+        
+        # Add legends
+        lines1, labels1 = ax2.get_legend_handles_labels()
+        lines2, labels2 = ax2_twin.get_legend_handles_labels()
+        ax2.legend(lines1 + lines2, labels1 + labels2, loc='upper right', frameon=False, fontsize=10)
+        
+        # Add data point labels for mappable bases
+        for i, (q, bases) in enumerate(zip(quality_thresholds, mappable_bases)):
+            ax2_twin.annotate(f'{bases}', (q, bases), xytext=(5, -15), 
+                             textcoords='offset points', fontsize=8, alpha=0.8, color=color2)
+        
+        plt.tight_layout()
+        
+        # Save the plot
+        project_name = os.path.basename(results_dir)
+        qc_plot_path = os.path.join(results_dir, f"qc_plot_{project_name}.png")
+        fig.savefig(qc_plot_path, dpi=300, bbox_inches='tight')
+        plt.close(fig)
+        
+        logging.info(f"QC plot saved to: {qc_plot_path}")
+        
+        # Save data as CSV
+        qc_data_path = os.path.join(results_dir, "simple_qc_data.csv")
+        with open(qc_data_path, 'w') as f:
+            f.write("quality_threshold,mean_aa_mutations,std_aa_mutations,ci_lower,ci_upper,")
+            f.write("total_mappable_bases,n_segments\n")
+            
+            for q, r in zip(quality_thresholds, qc_results):
+                f.write(f"{q},{r['mean_aa_mutations']:.6f},{r['std_aa_mutations']:.6f},")
+                f.write(f"{r['ci_lower']:.6f},{r['ci_upper']:.6f},")
+                f.write(f"{r['total_mappable_bases']},{r['n_segments']}\n")
+        
+        logging.info(f"Simple QC data saved to: {qc_data_path}")
+        
+    except Exception as e:
+        logging.error(f"Error creating simple QC plots: {e}")
+    """
+    Create comprehensive QC plots with error bars and uncertainty quantification.
+    
+    Args:
+        quality_thresholds: List of quality score thresholds
+        qc_results: List of comprehensive analysis results
+        results_dir: Directory to save the plots
+        optimal_qscore: Optimal Q-score threshold (optional)
+        optimal_result: Optimal result data (optional)
+    """
+    try:
+        # Extract data for plotting
+        aa_mutations = [r['mean_aa_mutations'] for r in qc_results]
+        aa_errors = [r['std_aa_mutations'] for r in qc_results]
+        aa_ci_lower = [r['ci_lower'] for r in qc_results]
+        aa_ci_upper = [r['ci_upper'] for r in qc_results]
+        mappable_bases = [r['mappable_bases'] for r in qc_results]
+        net_rates = [r['net_rate'] for r in qc_results]
+        net_rate_errors = [r['net_rate_error'] for r in qc_results]
+        
+        # Create main QC plot with error bars
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 12))
+        
+        # Top plot: AA mutations per gene with error bars
+        color1 = '#2E8B57'
+        ax1.errorbar(quality_thresholds, aa_mutations, yerr=aa_errors, 
+                    fmt='o', capsize=5, capthick=2, markersize=8, 
+                    color=color1, ecolor=color1, alpha=0.8, label='Mean ± Std')
+        
+        # Add confidence intervals as shaded area
+        ax1.fill_between(quality_thresholds, aa_ci_lower, aa_ci_upper, 
+                        alpha=0.3, color=color1, label='95% Confidence Interval')
+        
+        ax1.set_xlabel('Quality Score Threshold', fontsize=12, fontweight='bold')
+        ax1.set_ylabel('Estimated AA Mutations per Gene', fontsize=12, fontweight='bold', color=color1)
+        ax1.tick_params(axis='y', labelcolor=color1)
+        ax1.set_title('AA Mutations per Gene vs Quality Score Filter (with Error Propagation)', 
+                     fontsize=14, fontweight='bold')
+        ax1.grid(True, alpha=0.3)
+        ax1.legend(frameon=False, fontsize=10)
+        
+        # Add data point labels
+        for i, (q, aa_mut, aa_err) in enumerate(zip(quality_thresholds, aa_mutations, aa_errors)):
+            ax1.annotate(f'Q{q}\n{aa_mut:.3f}±{aa_err:.3f}', 
+                        (q, aa_mut), xytext=(5, 5), 
+                        textcoords='offset points', fontsize=8, alpha=0.8, color=color1)
+        
+        # Bottom plot: Mappable bases and AA mutations per gene
+        color2 = '#FF6B6B'
+        color3 = '#4169E1'
+        
+        # Mappable bases (left y-axis)
+        ax2_twin = ax2.twinx()
+        ax2_twin.scatter(quality_thresholds, mappable_bases, 
+                        s=100, alpha=0.7, color=color2, edgecolors='black', 
+                        linewidth=1, marker='s', label='Mappable Bases')
+        ax2_twin.set_ylabel('Number of Mappable Bases', fontsize=12, fontweight='bold', color=color2)
+        ax2_twin.tick_params(axis='y', labelcolor=color2)
+        
+        # AA mutations per gene with error bars (right y-axis)
+        ax2.errorbar(quality_thresholds, aa_mutations, yerr=aa_errors,
+                    fmt='^', capsize=5, capthick=2, markersize=8,
+                    color=color3, ecolor=color3, alpha=0.8, label='AA Mutations ± Error')
+        ax2.set_ylabel('Estimated AA Mutations per Gene', fontsize=12, fontweight='bold', color=color3)
+        ax2.tick_params(axis='y', labelcolor=color3)
+        ax2.set_xlabel('Quality Score Threshold', fontsize=12, fontweight='bold')
+        ax2.set_title('Mappable Bases and AA Mutations per Gene vs Quality Score Filter', 
+                     fontsize=14, fontweight='bold')
+        ax2.grid(True, alpha=0.3)
+        
+        # Add legends
+        lines1, labels1 = ax2.get_legend_handles_labels()
+        lines2, labels2 = ax2_twin.get_legend_handles_labels()
+        ax2.legend(lines1 + lines2, labels1 + labels2, loc='upper right', frameon=False, fontsize=10)
+        
+        # Add data point labels for mappable bases
+        for i, (q, bases) in enumerate(zip(quality_thresholds, mappable_bases)):
+            ax2_twin.annotate(f'{bases}', (q, bases), xytext=(5, -15), 
+                             textcoords='offset points', fontsize=8, alpha=0.8, color=color2)
+        
+        plt.tight_layout()
+        
+        # Save the comprehensive plot
+        qc_plot_path = os.path.join(results_dir, "comprehensive_qc_analysis.png")
+        fig.savefig(qc_plot_path, dpi=300, bbox_inches='tight')
+        plt.close(fig)
+        
+        logging.info(f"Comprehensive QC plot saved to: {qc_plot_path}")
+        
+        # Create error analysis plot
+        create_error_analysis_plot(quality_thresholds, qc_results, results_dir)
+        
+        # Save comprehensive data as CSV
+        qc_data_path = os.path.join(results_dir, "comprehensive_qc_data.csv")
+        with open(qc_data_path, 'w') as f:
+            f.write("quality_threshold,mean_aa_mutations,std_aa_mutations,ci_lower,ci_upper,")
+            f.write("mappable_bases,hit_rate,hit_rate_ci_lower,hit_rate_ci_upper,")
+            f.write("bg_rate,bg_rate_ci_lower,bg_rate_ci_upper,net_rate,net_rate_error,")
+            f.write("lambda_bp,lambda_error,alignment_error,")
+            f.write("hit_qscore_mean,hit_qscore_std,hit_qscore_uncertainty,")
+            f.write("bg_qscore_mean,bg_qscore_std,bg_qscore_uncertainty,")
+            f.write("hit_weighted_rate,hit_weighted_error,bg_weighted_rate,bg_weighted_error,")
+            f.write("net_weighted_rate,net_weighted_error,lambda_bp_weighted,lambda_error_weighted\n")
+            
+            for q, r in zip(quality_thresholds, qc_results):
+                f.write(f"{q},{r['mean_aa_mutations']:.6f},{r['std_aa_mutations']:.6f},")
+                f.write(f"{r['ci_lower']:.6f},{r['ci_upper']:.6f},")
+                f.write(f"{r['mappable_bases']},{r['hit_rate']:.6f},")
+                f.write(f"{r['hit_rate_ci'][0]:.6f},{r['hit_rate_ci'][1]:.6f},")
+                f.write(f"{r['bg_rate']:.6f},{r['bg_rate_ci'][0]:.6f},{r['bg_rate_ci'][1]:.6f},")
+                f.write(f"{r['net_rate']:.6f},{r['net_rate_error']:.6f},")
+                f.write(f"{r['lambda_bp']:.6f},{r['lambda_error']:.6f},{r['alignment_error']:.6f},")
+                
+                # Q-score information
+                hit_qscore_mean = r['hit_qscore_stats']['mean_qscore'] if r['hit_qscore_stats'] else 0.0
+                hit_qscore_std = r['hit_qscore_stats']['std_qscore'] if r['hit_qscore_stats'] else 0.0
+                bg_qscore_mean = r['bg_qscore_stats']['mean_qscore'] if r['bg_qscore_stats'] else 0.0
+                bg_qscore_std = r['bg_qscore_stats']['std_qscore'] if r['bg_qscore_stats'] else 0.0
+                
+                f.write(f"{hit_qscore_mean:.2f},{hit_qscore_std:.2f},{r['hit_qscore_uncertainty']:.6f},")
+                f.write(f"{bg_qscore_mean:.2f},{bg_qscore_std:.2f},{r['bg_qscore_uncertainty']:.6f},")
+                f.write(f"{r.get('hit_weighted_rate', 0.0):.6f},{r.get('hit_weighted_error', 0.0):.6f},")
+                f.write(f"{r.get('bg_weighted_rate', 0.0):.6f},{r.get('bg_weighted_error', 0.0):.6f},")
+                f.write(f"{r.get('net_weighted_rate', 0.0):.6f},{r.get('net_weighted_error', 0.0):.6f},")
+                f.write(f"{r.get('lambda_bp_weighted', 0.0):.6f},{r.get('lambda_error_weighted', 0.0):.6f}\n")
+        
+        logging.info(f"Comprehensive QC data saved to: {qc_data_path}")
+        
+    except Exception as e:
+        logging.error(f"Error creating comprehensive QC plots: {e}")
+
+def create_error_analysis_plot(quality_thresholds, qc_results, results_dir):
+    """
+    Create a detailed error analysis plot showing different sources of uncertainty.
+    
+    Args:
+        quality_thresholds: List of quality score thresholds
+        qc_results: List of comprehensive analysis results
+        results_dir: Directory to save the plot
+    """
+    try:
+        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
+        
+        # Extract error components
+        aa_std = [r['std_aa_mutations'] for r in qc_results]
+        net_rate_errors = [r['net_rate_error'] for r in qc_results]
+        lambda_errors = [r['lambda_error'] for r in qc_results]
+        alignment_errors = [r['alignment_error'] for r in qc_results]
+        mappable_bases = [r['mappable_bases'] for r in qc_results]
+        
+        # Plot 1: AA mutation uncertainty vs quality threshold
+        ax1.plot(quality_thresholds, aa_std, 'o-', color='#2E8B57', linewidth=2, markersize=6)
+        ax1.set_xlabel('Quality Score Threshold')
+        ax1.set_ylabel('AA Mutation Standard Deviation')
+        ax1.set_title('AA Mutation Uncertainty vs Quality Filter')
+        ax1.grid(True, alpha=0.3)
+        
+        # Plot 2: Net rate error vs quality threshold
+        ax2.plot(quality_thresholds, net_rate_errors, 's-', color='#FF6B6B', linewidth=2, markersize=6)
+        ax2.set_xlabel('Quality Score Threshold')
+        ax2.set_ylabel('Net Mutation Rate Error')
+        ax2.set_title('Net Rate Error vs Quality Filter')
+        ax2.grid(True, alpha=0.3)
+        
+        # Plot 3: Lambda error vs quality threshold
+        ax3.plot(quality_thresholds, lambda_errors, '^-', color='#4169E1', linewidth=2, markersize=6)
+        ax3.set_xlabel('Quality Score Threshold')
+        ax3.set_ylabel('Lambda Error (mutations per copy)')
+        ax3.set_title('Lambda Error vs Quality Filter')
+        ax3.grid(True, alpha=0.3)
+        
+        # Plot 4: Alignment error vs mappable bases
+        ax4.scatter(mappable_bases, alignment_errors, s=100, alpha=0.7, color='#FF8C00')
+        ax4.set_xlabel('Mappable Bases')
+        ax4.set_ylabel('Alignment Error (1/√reads)')
+        ax4.set_title('Alignment Error vs Read Count')
+        ax4.grid(True, alpha=0.3)
+        
+        # Add quality threshold labels to scatter plot
+        for i, q in enumerate(quality_thresholds):
+            ax4.annotate(f'Q{q}', (mappable_bases[i], alignment_errors[i]), 
+                        xytext=(5, 5), textcoords='offset points', fontsize=8)
+        
+        plt.tight_layout()
+        
+        # Save error analysis plot
+        error_plot_path = os.path.join(results_dir, "error_analysis.png")
+        fig.savefig(error_plot_path, dpi=300, bbox_inches='tight')
+        plt.close(fig)
+        
+        logging.info(f"Error analysis plot saved to: {error_plot_path}")
+        
+    except Exception as e:
+        logging.error(f"Error creating error analysis plot: {e}")
+
+def create_qc_plot(quality_thresholds, aa_mutations, mappable_bases, results_dir):
+    """
+    Create a dual-axis plot showing quality score threshold vs AA mutations per gene and mappable bases.
     
     Args:
         quality_thresholds: List of quality score thresholds
         aa_mutations: List of corresponding AA mutations per gene
-        mappable_reads: List of corresponding mappable reads
+        mappable_bases: List of corresponding mappable bases
         results_dir: Directory to save the plot
     """
     try:
@@ -476,16 +925,16 @@ def create_qc_plot(quality_thresholds, aa_mutations, mappable_reads, results_dir
                    s=100, alpha=0.7, color=color1, edgecolors='black', linewidth=1, label='AA Mutations per Gene')
         ax1.tick_params(axis='y', labelcolor=color1)
         
-        # Right y-axis: Mappable reads
+        # Right y-axis: Mappable bases
         ax2 = ax1.twinx()
         color2 = '#FF6B6B'
-        ax2.set_ylabel('Number of Mappable Reads', fontsize=12, fontweight='bold', color=color2)
-        ax2.scatter(quality_thresholds, mappable_reads, 
-                   s=100, alpha=0.7, color=color2, edgecolors='black', linewidth=1, marker='s', label='Mappable Reads')
+        ax2.set_ylabel('Number of Mappable Bases', fontsize=12, fontweight='bold', color=color2)
+        ax2.scatter(quality_thresholds, mappable_bases, 
+                   s=100, alpha=0.7, color=color2, edgecolors='black', linewidth=1, marker='s', label='Mappable Bases')
         ax2.tick_params(axis='y', labelcolor=color2)
         
         # Customize the plot
-        ax1.set_title('AA Mutations per Gene and Mappable Reads vs Quality Score Filter', fontsize=14, fontweight='bold')
+        ax1.set_title('AA Mutations per Gene and Mappable Bases vs Quality Score Filter', fontsize=14, fontweight='bold')
         
         # Add grid for better readability
         ax1.grid(True, alpha=0.3)
@@ -501,8 +950,8 @@ def create_qc_plot(quality_thresholds, aa_mutations, mappable_reads, results_dir
             ax1.annotate(f'Q{q}', (q, aa_mut), xytext=(5, 5), 
                         textcoords='offset points', fontsize=9, alpha=0.8, color=color1)
         
-        # Add data point labels for mappable reads
-        for i, (q, reads) in enumerate(zip(quality_thresholds, mappable_reads)):
+        # Add data point labels for mappable bases
+        for i, (q, bases) in enumerate(zip(quality_thresholds, mappable_bases)):
             ax2.annotate(f'{reads}', (q, reads), xytext=(5, -15), 
                         textcoords='offset points', fontsize=8, alpha=0.8, color=color2)
         
@@ -521,14 +970,749 @@ def create_qc_plot(quality_thresholds, aa_mutations, mappable_reads, results_dir
         # Also save data as CSV for reference
         qc_data_path = os.path.join(results_dir, "qc_mutation_rate_vs_quality.csv")
         with open(qc_data_path, 'w') as f:
-            f.write("quality_threshold,aa_mutations_per_gene,mappable_reads\n")
-            for q, aa_mut, reads in zip(quality_thresholds, aa_mutations, mappable_reads):
-                f.write(f"{q},{aa_mut:.6f},{reads}\n")
+            f.write("quality_threshold,aa_mutations_per_gene,mappable_bases\n")
+            for q, aa_mut, bases in zip(quality_thresholds, aa_mutations, mappable_bases):
+                f.write(f"{q},{aa_mut:.6f},{bases}\n")
         
         logging.info(f"QC data saved to: {qc_data_path}")
         
     except Exception as e:
         logging.error(f"Error creating QC plot: {e}")
+
+def extract_qscores_from_sam(sam_file):
+    """
+    Extract Q-scores from SAM file and calculate statistics.
+    
+    Args:
+        sam_file: Path to SAM file
+    
+    Returns:
+        dict: Q-score statistics including mean, std, and per-position averages
+    """
+    try:
+        import pysam
+        
+        qscores = []
+        position_qscores = {}  # position -> list of qscores
+        
+        with pysam.AlignmentFile(sam_file, "r") as samfile:
+            for read in samfile:
+                if read.is_unmapped:
+                    continue
+                
+                # Get Q-scores for this read
+                read_qscores = read.query_qualities
+                if read_qscores is None:
+                    continue
+                
+                # Convert to Q-score values (Phred+33 encoding)
+                q_values = [q + 33 for q in read_qscores]
+                qscores.extend(q_values)
+                
+                # Store per-position Q-scores
+                for i, q_val in enumerate(q_values):
+                    pos = read.reference_start + i
+                    if pos not in position_qscores:
+                        position_qscores[pos] = []
+                    position_qscores[pos].append(q_val)
+        
+        if not qscores:
+            return {
+                'mean_qscore': 0.0,
+                'std_qscore': 0.0,
+                'min_qscore': 0.0,
+                'max_qscore': 0.0,
+                'position_avg_qscores': {},
+                'total_bases': 0
+            }
+        
+        # Calculate statistics
+        mean_qscore = np.mean(qscores)
+        std_qscore = np.std(qscores)
+        min_qscore = np.min(qscores)
+        max_qscore = np.max(qscores)
+        
+        # Calculate per-position average Q-scores
+        position_avg_qscores = {}
+        for pos, pos_qscores in position_qscores.items():
+            position_avg_qscores[pos] = np.mean(pos_qscores)
+        
+        return {
+            'mean_qscore': mean_qscore,
+            'std_qscore': std_qscore,
+            'min_qscore': min_qscore,
+            'max_qscore': max_qscore,
+            'position_avg_qscores': position_avg_qscores,
+            'total_bases': len(qscores)
+        }
+        
+    except Exception as e:
+        logging.error(f"Error extracting Q-scores from {sam_file}: {e}")
+        return {
+            'mean_qscore': 0.0,
+            'std_qscore': 0.0,
+            'min_qscore': 0.0,
+            'max_qscore': 0.0,
+            'position_avg_qscores': {},
+            'total_bases': 0
+        }
+
+def qscore_uncertainty_factor(qscore):
+    """
+    Convert Q-score to uncertainty factor.
+    
+    Args:
+        qscore: Q-score value (typically 0-40)
+    
+    Returns:
+        float: Uncertainty factor (0-1, where 1 = maximum uncertainty)
+    """
+    if qscore <= 0:
+        return 1.0  # Maximum uncertainty
+    
+    # Q-score = -10 * log10(P_error)
+    # P_error = 10^(-Q/10)
+    # Uncertainty factor = sqrt(P_error) for error propagation
+    error_probability = 10**(-qscore/10)
+    uncertainty_factor = np.sqrt(error_probability)
+    
+    return uncertainty_factor
+
+def segment_fastq_file(input_fastq, n_segments=10):
+    """
+    Segment a FASTQ file into N parts for error estimation.
+    
+    Args:
+        input_fastq: Path to input FASTQ.gz file
+        n_segments: Number of segments to create
+    
+    Returns:
+        list: Paths to segmented FASTQ files
+    """
+    try:
+        import gzip
+        from itertools import cycle
+        
+        # Create output directory
+        base_name = os.path.splitext(os.path.basename(input_fastq))[0].replace('.fastq', '')
+        segment_dir = os.path.join(os.path.dirname(input_fastq), f"{base_name}_segments")
+        os.makedirs(segment_dir, exist_ok=True)
+        
+        # Open output files
+        segment_files = []
+        file_handles = []
+        
+        for i in range(n_segments):
+            segment_path = os.path.join(segment_dir, f"{base_name}_segment_{i+1}.fastq.gz")
+            segment_files.append(segment_path)
+            file_handles.append(gzip.open(segment_path, 'wt'))
+        
+        # Read and distribute reads
+        read_count = 0
+        with gzip.open(input_fastq, 'rt') as infile:
+            current_read = []
+            
+            for line in infile:
+                current_read.append(line)
+                
+                # Complete read (4 lines)
+                if len(current_read) == 4:
+                    # Write to current segment
+                    segment_idx = read_count % n_segments
+                    for line in current_read:
+                        file_handles[segment_idx].write(line)
+                    
+                    read_count += 1
+                    current_read = []
+        
+        # Close all files
+        for fh in file_handles:
+            fh.close()
+        
+        logging.info(f"Segmented {read_count} reads into {n_segments} files")
+        return segment_files
+        
+    except Exception as e:
+        logging.error(f"Error segmenting FASTQ file: {e}")
+        return []
+
+def run_segmented_analysis(segment_files, quality_threshold, work_dir, ref_hit_fasta, plasmid_fasta):
+    """
+    Run mutation rate analysis on each segment and calculate empirical error.
+    
+    Args:
+        segment_files: List of segmented FASTQ files
+        quality_threshold: Quality score threshold
+        work_dir: Working directory
+        ref_hit_fasta: Path to reference hit FASTA
+        plasmid_fasta: Path to plasmid FASTA
+    
+    Returns:
+        dict: Results with empirical error estimates
+    """
+    try:
+        segment_results = []
+        
+        for i, segment_file in enumerate(segment_files):
+            logging.info(f"Processing segment {i+1}/{len(segment_files)}")
+            
+            # Filter segment with NanoFilt
+            filtered_segment = os.path.join(work_dir, f"segment_{i+1}_q{quality_threshold}.fastq.gz")
+            if not run_nanofilt_filtering(segment_file, quality_threshold, filtered_segment):
+                logging.warning(f"Failed to filter segment {i+1}")
+                continue
+            
+            # Load sequences
+            hit_seq, hit_id = load_single_sequence(ref_hit_fasta)
+            plasmid_seq, plasmid_id = load_single_sequence(plasmid_fasta)
+            
+            # Find hit region in plasmid
+            idx = plasmid_seq.upper().find(hit_seq.upper())
+            if idx == -1:
+                logging.error(f"Gene region not found in plasmid for segment {i+1}")
+                continue
+            
+            # Align filtered reads to hit region
+            sam_hit = run_minimap2(filtered_segment, ref_hit_fasta, f"hit_segment_{i+1}_q{quality_threshold}", work_dir)
+            
+            # Align filtered reads to full plasmid for background calculation
+            sam_plasmid = run_minimap2(filtered_segment, plasmid_fasta, f"plasmid_segment_{i+1}_q{quality_threshold}", work_dir)
+            
+            # Calculate background rate from full plasmid alignment, excluding target region
+            bg_mis, bg_cov, bg_reads = calculate_background_from_plasmid(sam_plasmid, plasmid_seq, idx, len(hit_seq))
+            
+            # Calculate hit region mutation rate
+            mismatch_hit = compute_mismatch_stats_sam(sam_hit, {hit_id: hit_seq})
+            hit_info = mismatch_hit[hit_id]
+            hit_mis = hit_info["total_mismatches"]
+            hit_cov = hit_info["total_covered_bases"]
+            
+            # Calculate rates
+            hit_rate = hit_mis / hit_cov if hit_cov > 0 else 0
+            bg_rate = bg_mis / bg_cov if bg_cov > 0 else 0
+            net_rate = max(hit_rate - bg_rate, 0.0)
+            
+            # Calculate AA mutations per gene (simplified)
+            lambda_bp = net_rate * len(hit_seq)
+            aa_mutations = lambda_bp / 3.0  # Approximate: 3 bp per AA
+            
+            segment_results.append({
+                'segment': i+1,
+                'hit_rate': hit_rate,
+                'bg_rate': bg_rate,
+                'net_rate': net_rate,
+                'aa_mutations': aa_mutations,
+                'mappable_bases': hit_cov,
+                'hit_mismatches': hit_mis,
+                'hit_coverage': hit_cov
+            })
+        
+        if not segment_results:
+            return None
+        
+        # Calculate empirical statistics
+        aa_mutations_list = [r['aa_mutations'] for r in segment_results]
+        net_rates_list = [r['net_rate'] for r in segment_results]
+        mappable_bases_list = [r['mappable_bases'] for r in segment_results]
+        
+        mean_aa = np.mean(aa_mutations_list)
+        std_aa = np.std(aa_mutations_list, ddof=1)  # Sample standard deviation
+        mean_net_rate = np.mean(net_rates_list)
+        std_net_rate = np.std(net_rates_list, ddof=1)
+        total_mappable_bases = sum(mappable_bases_list)
+        
+        # Calculate confidence interval using t-distribution
+        n_segments = len(segment_results)
+        if n_segments > 1:
+            # 95% confidence interval
+            from scipy.stats import t
+            t_val = t.ppf(0.975, n_segments - 1)
+            se_aa = std_aa / np.sqrt(n_segments)
+            ci_lower = mean_aa - t_val * se_aa
+            ci_upper = mean_aa + t_val * se_aa
+        else:
+            ci_lower = mean_aa
+            ci_upper = mean_aa
+        
+        return {
+            'mean_aa_mutations': mean_aa,
+            'std_aa_mutations': std_aa,
+            'ci_lower': ci_lower,
+            'ci_upper': ci_upper,
+            'mean_net_rate': mean_net_rate,
+            'std_net_rate': std_net_rate,
+            'total_mappable_bases': total_mappable_bases,
+            'n_segments': n_segments,
+            'segment_results': segment_results,
+            'quality_threshold': quality_threshold
+        }
+        
+    except Exception as e:
+        logging.error(f"Error in segmented analysis: {e}")
+        return None
+    """
+    Calculate mismatches weighted by Q-score uncertainty with proper sampling error.
+    
+    Args:
+        sam_file: Path to SAM file
+        ref_seq: Reference sequence
+        qscore_stats: Q-score statistics from extract_qscores_from_sam
+    
+    Returns:
+        tuple: (weighted_mismatches, total_weighted_coverage, raw_mismatches, raw_coverage, position_weights, position_outcomes)
+    """
+    try:
+        import pysam
+        
+        weighted_mismatches = 0.0
+        total_weighted_coverage = 0.0
+        raw_mismatches = 0
+        raw_coverage = 0
+        
+        # Store position-level data for proper sampling error calculation
+        position_weights = []
+        position_outcomes = []
+        
+        position_qscores = qscore_stats['position_avg_qscores']
+        
+        with pysam.AlignmentFile(sam_file, "r") as samfile:
+            for read in samfile:
+                if read.is_unmapped:
+                    continue
+                
+                # Get aligned pairs (read_pos, ref_pos)
+                for read_pos, ref_pos in read.get_aligned_pairs(matches_only=False):
+                    if ref_pos is None or read_pos is None:
+                        continue
+                    
+                    if ref_pos >= len(ref_seq):
+                        continue
+                    
+                    # Get base calls
+                    read_base = read.query_sequence[read_pos].upper()
+                    ref_base = ref_seq[ref_pos].upper()
+                    
+                    # Skip if either base is N
+                    if read_base == 'N' or ref_base == 'N':
+                        continue
+                    
+                    # Get Q-score for this position
+                    qscore = position_qscores.get(ref_pos, qscore_stats['mean_qscore'])
+                    uncertainty_factor = qscore_uncertainty_factor(qscore)
+                    
+                    # Weight by uncertainty (lower Q-score = higher uncertainty = lower weight)
+                    weight = 1.0 - uncertainty_factor
+                    
+                    # Store position-level data
+                    position_weights.append(weight)
+                    position_outcomes.append(1 if read_base != ref_base else 0)
+                    
+                    # Count coverage
+                    total_weighted_coverage += weight
+                    raw_coverage += 1
+                    
+                    # Count mismatches
+                    if read_base != ref_base:
+                        weighted_mismatches += weight
+                        raw_mismatches += 1
+        
+        return weighted_mismatches, total_weighted_coverage, raw_mismatches, raw_coverage, position_weights, position_outcomes
+        
+    except Exception as e:
+        logging.error(f"Error calculating Q-score weighted mismatches: {e}")
+        return 0.0, 0.0, 0, 0, [], []
+
+def calculate_weighted_sampling_error(position_weights, position_outcomes):
+    """
+    Calculate proper weighted sampling error from position-level data.
+    
+    Args:
+        position_weights: List of weights for each position
+        position_outcomes: List of outcomes (0=match, 1=mismatch) for each position
+    
+    Returns:
+        tuple: (weighted_rate, weighted_error)
+    """
+    if not position_weights or len(position_weights) == 0:
+        return 0.0, 0.0
+    
+    position_weights = np.array(position_weights)
+    position_outcomes = np.array(position_outcomes)
+    
+    # Calculate weighted rate
+    weighted_mismatches = np.sum(position_weights * position_outcomes)
+    weighted_coverage = np.sum(position_weights)
+    
+    if weighted_coverage == 0:
+        return 0.0, 0.0
+    
+    weighted_rate = weighted_mismatches / weighted_coverage
+    
+    # Proper weighted sampling error calculation
+    # Var(p̂) = (1/W²) * Σ[w_i² * (y_i - p̂)²]
+    # where W = Σw_i, y_i = outcome, p̂ = weighted rate
+    
+    residuals = position_outcomes - weighted_rate
+    weighted_residuals_squared = position_weights**2 * residuals**2
+    weighted_error = np.sqrt(np.sum(weighted_residuals_squared) / (weighted_coverage**2))
+    
+    return weighted_rate, weighted_error
+
+def calculate_qscore_weighted_error_propagation(weighted_mismatches, weighted_coverage, qscore_stats):
+    """
+    Calculate error propagation for Q-score weighted mutation rates using proper weighted sampling theory.
+    
+    Args:
+        weighted_mismatches: Q-score weighted mismatch count
+        weighted_coverage: Q-score weighted coverage
+        qscore_stats: Q-score statistics
+    
+    Returns:
+        tuple: (weighted_rate, weighted_error)
+    """
+    if weighted_coverage == 0:
+        return 0.0, 0.0
+    
+    weighted_rate = weighted_mismatches / weighted_coverage
+    
+    # Proper weighted sampling error calculation
+    # For weighted binomial: Var(p̂) ≈ (1/n²) * Σ[w_i² * p * (1-p)]
+    # where n = Σw_i (weighted_coverage)
+    
+    # Estimate weight variance from Q-score statistics
+    mean_qscore = qscore_stats['mean_qscore']
+    std_qscore = qscore_stats['std_qscore']
+    
+    # Convert Q-score statistics to weight statistics
+    mean_weight = 1.0 - qscore_uncertainty_factor(mean_qscore)
+    
+    # Approximate weight variance using delta method
+    # If w = 1 - sqrt(10^(-Q/10)), then Var(w) ≈ Var(Q) * (dw/dQ)²
+    # dw/dQ = (ln(10)/20) * 10^(-Q/10) * (1/sqrt(10^(-Q/10)))
+    #       = (ln(10)/20) * sqrt(10^(-Q/10))
+    
+    if mean_qscore > 0:
+        # Delta method approximation for weight variance
+        error_prob = 10**(-mean_qscore/10)
+        weight_derivative = (np.log(10)/20) * np.sqrt(error_prob)
+        weight_variance = (std_qscore**2) * (weight_derivative**2)
+    else:
+        weight_variance = 0.0
+    
+    # Effective sample size for weighted sampling
+    # n_eff = (Σw_i)² / Σ(w_i²) ≈ (Σw_i)² / [n * (E[w]² + Var[w])]
+    n_positions = qscore_stats.get('total_bases', weighted_coverage)
+    if n_positions > 0:
+        expected_w_squared = mean_weight**2 + weight_variance
+        effective_n = (weighted_coverage**2) / (n_positions * expected_w_squared)
+    else:
+        effective_n = weighted_coverage / mean_weight
+    
+    # Weighted sampling error
+    # Var(p̂) = p(1-p) / n_eff * [1 + (Var[w]/E[w]²)]
+    weight_cv_squared = weight_variance / (mean_weight**2) if mean_weight > 0 else 0
+    weighted_error = np.sqrt(weighted_rate * (1 - weighted_rate) / effective_n * (1 + weight_cv_squared))
+    
+    return weighted_rate, weighted_error
+
+def binomial_confidence_interval(successes, trials, confidence=0.95):
+    """
+    Calculate confidence interval for binomial proportion using beta distribution.
+    
+    Args:
+        successes: Number of successes
+        trials: Number of trials
+        confidence: Confidence level (default 0.95 for 95% CI)
+    
+    Returns:
+        tuple: (lower_bound, upper_bound)
+    """
+    if not HAVE_SCIPY:
+        # Simple normal approximation if scipy not available
+        p = successes / trials if trials > 0 else 0
+        se = np.sqrt(p * (1 - p) / trials) if trials > 0 else 0
+        z = norm.ppf(1 - (1 - confidence) / 2)
+        return max(0, p - z * se), min(1, p + z * se)
+    
+    alpha = 1 - confidence
+    lower = beta.ppf(alpha/2, successes, trials - successes + 1) if trials > successes else 0
+    upper = beta.ppf(1 - alpha/2, successes + 1, trials - successes) if successes > 0 else 0
+    return lower, upper
+
+def propagate_mutation_rate_error(hit_mis, hit_cov, bg_mis, bg_cov, hit_qscore_stats=None, bg_qscore_stats=None):
+    """
+    Calculate error propagation for net mutation rate = hit_rate - bg_rate, including Q-score uncertainty.
+    
+    Args:
+        hit_mis, hit_cov: Hit region mismatches and coverage
+        bg_mis, bg_cov: Background mismatches and coverage
+        hit_qscore_stats: Q-score statistics for hit region (optional)
+        bg_qscore_stats: Q-score statistics for background region (optional)
+    
+    Returns:
+        tuple: (net_rate, net_rate_error)
+    """
+    if hit_cov == 0 or bg_cov == 0:
+        return 0.0, 0.0
+    
+    hit_rate = hit_mis / hit_cov
+    bg_rate = bg_mis / bg_cov
+    
+    # Binomial standard errors
+    hit_se = np.sqrt(hit_rate * (1 - hit_rate) / hit_cov)
+    bg_se = np.sqrt(bg_rate * (1 - bg_rate) / bg_cov)
+    
+    # Add Q-score uncertainty if available
+    if hit_qscore_stats:
+        hit_qscore_uncertainty = qscore_uncertainty_factor(hit_qscore_stats['mean_qscore'])
+        hit_se = np.sqrt(hit_se**2 + hit_qscore_uncertainty**2)
+    
+    if bg_qscore_stats:
+        bg_qscore_uncertainty = qscore_uncertainty_factor(bg_qscore_stats['mean_qscore'])
+        bg_se = np.sqrt(bg_se**2 + bg_qscore_uncertainty**2)
+    
+    # Net rate and error propagation
+    net_rate = max(hit_rate - bg_rate, 0.0)
+    net_se = np.sqrt(hit_se**2 + bg_se**2)
+    
+    return net_rate, net_se
+
+def simulate_aa_distribution_with_error(lambda_bp, lambda_error, cds_seq, n_trials=10000):
+    """
+    Enhanced Monte Carlo simulation that includes uncertainty in lambda_bp.
+    
+    Args:
+        lambda_bp: Mean mutations per copy (basepairs)
+        lambda_error: Standard error of lambda_bp
+        cds_seq: Coding sequence
+        n_trials: Number of Monte Carlo trials
+    
+    Returns:
+        tuple: (mean_aa_mutations, std_aa_mutations, aa_distribution)
+    """
+    prot_orig = str(Seq(cds_seq).translate(to_stop=False))
+    aa_diffs = []
+    
+    for _ in range(n_trials):
+        # Sample lambda from normal distribution with error
+        lambda_sample = np.random.normal(lambda_bp, lambda_error)
+        lambda_sample = max(lambda_sample, 0)  # Ensure non-negative
+        
+        # Number of base changes in this trial ~ Poisson(lambda_sample)
+        n_bp_mut = np.random.poisson(lambda_sample)
+        
+        # Make a mutable copy of the CDS
+        seq_list = list(cds_seq.upper())
+        
+        # Introduce exactly n_bp_mut random single‐base substitutions
+        for _ in range(n_bp_mut):
+            pos = random.randrange(len(seq_list))
+            orig_base = seq_list[pos]
+            bases = ["A", "T", "C", "G"]
+            bases.remove(orig_base)
+            seq_list[pos] = random.choice(bases)
+        
+        # Translate mutated sequence (no early stop)
+        mutated_prot = str(Seq("".join(seq_list)).translate(to_stop=False))
+        
+        # Count how many amino acids differ
+        aa_diff = sum(1 for a, b in zip(prot_orig, mutated_prot) if a != b)
+        aa_diffs.append(aa_diff)
+    
+    mean_aa = np.mean(aa_diffs)
+    std_aa = np.std(aa_diffs)
+    
+    return mean_aa, std_aa, aa_diffs
+
+def bootstrap_aa_mutations(hit_mis, hit_cov, bg_mis, bg_cov, cds_seq, n_bootstrap=1000):
+    """
+    Bootstrap resampling to estimate confidence intervals for AA mutations.
+    
+    Args:
+        hit_mis, hit_cov: Hit region mismatches and coverage
+        bg_mis, bg_cov: Background mismatches and coverage
+        cds_seq: Coding sequence
+        n_bootstrap: Number of bootstrap samples
+    
+    Returns:
+        tuple: (mean_aa_mutations, ci_lower, ci_upper, bootstrap_distribution)
+    """
+    bootstrap_results = []
+    
+    for _ in range(n_bootstrap):
+        # Resample reads with replacement (binomial resampling)
+        hit_mis_boot = np.random.binomial(hit_cov, hit_mis/hit_cov) if hit_cov > 0 else 0
+        bg_mis_boot = np.random.binomial(bg_cov, bg_mis/bg_cov) if bg_cov > 0 else 0
+        
+        # Calculate net rate
+        hit_rate_boot = hit_mis_boot / hit_cov if hit_cov > 0 else 0
+        bg_rate_boot = bg_mis_boot / bg_cov if bg_cov > 0 else 0
+        net_rate_boot = max(hit_rate_boot - bg_rate_boot, 0)
+        
+        # Calculate AA mutations
+        lambda_bp_boot = net_rate_boot * len(cds_seq)
+        
+        # Quick simulation for bootstrap (fewer trials for speed)
+        aa_mut_boot = simulate_aa_distribution(lambda_bp_boot, cds_seq, n_trials=1000)
+        bootstrap_results.append(np.mean(aa_mut_boot))
+    
+    mean_aa = np.mean(bootstrap_results)
+    # Use proper percentile calculation for 95% CI
+    ci_lower = np.percentile(bootstrap_results, 2.5)
+    ci_upper = np.percentile(bootstrap_results, 97.5)
+    
+    # Additional validation: ensure CI makes sense
+    if ci_lower > mean_aa or ci_upper < mean_aa:
+        logging.warning(f"Bootstrap CI validation failed: mean={mean_aa:.4f}, CI=[{ci_lower:.4f}, {ci_upper:.4f}]")
+        # Use empirical CI if percentile method fails
+        sorted_results = np.sort(bootstrap_results)
+        n = len(sorted_results)
+        ci_lower = sorted_results[int(0.025 * n)]
+        ci_upper = sorted_results[int(0.975 * n)]
+    
+    return mean_aa, ci_lower, ci_upper, bootstrap_results
+
+def comprehensive_aa_mutation_analysis(hit_mis, hit_cov, bg_mis, bg_cov, cds_seq, 
+                                       quality_threshold=None, n_trials=10000,
+                                       hit_qscore_stats=None, bg_qscore_stats=None,
+                                       sam_hit=None, sam_plasmid=None, hit_seq=None, plasmid_seq=None):
+    """
+    Comprehensive AA mutation analysis with full error propagation including Q-score uncertainty.
+    
+    Args:
+        hit_mis, hit_cov: Hit region mismatches and coverage
+        bg_mis, bg_cov: Background mismatches and coverage
+        cds_seq: Coding sequence
+        quality_threshold: Quality threshold for logging
+        n_trials: Number of Monte Carlo trials
+        hit_qscore_stats: Q-score statistics for hit region (optional)
+        bg_qscore_stats: Q-score statistics for background region (optional)
+    
+    Returns:
+        dict: Comprehensive results with all error estimates including Q-score effects
+    """
+    logging.info(f"=== COMPREHENSIVE ERROR MODEL ANALYSIS (Q{quality_threshold}) ===")
+    
+    # 1. Binomial confidence intervals for mutation rates
+    logging.info("1. Calculating binomial confidence intervals for mutation rates...")
+    hit_rate_ci = binomial_confidence_interval(hit_mis, hit_cov)
+    bg_rate_ci = binomial_confidence_interval(bg_mis, bg_cov)
+    logging.info(f"   Hit rate CI: [{hit_rate_ci[0]:.6f}, {hit_rate_ci[1]:.6f}]")
+    logging.info(f"   Background rate CI: [{bg_rate_ci[0]:.6f}, {bg_rate_ci[1]:.6f}]")
+    
+    # 2. Error propagation for net mutation rate (including Q-score uncertainty)
+    logging.info("2. Propagating errors for net mutation rate (including Q-score uncertainty)...")
+    net_rate, net_rate_error = propagate_mutation_rate_error(
+        hit_mis, hit_cov, bg_mis, bg_cov, hit_qscore_stats, bg_qscore_stats
+    )
+    logging.info(f"   Net mutation rate: {net_rate:.6f} ± {net_rate_error:.6f}")
+    
+    # 3. Calculate lambda_bp with error
+    logging.info("3. Calculating lambda_bp (mutations per copy) with error propagation...")
+    lambda_bp = net_rate * len(cds_seq)
+    lambda_error = net_rate_error * len(cds_seq)
+    logging.info(f"   Lambda_bp: {lambda_bp:.6f} ± {lambda_error:.6f} mutations per copy")
+    
+    # 4. Q-score weighted analysis
+    logging.info("4. Calculating Q-score weighted mutation rates...")
+    hit_weighted_mis, hit_weighted_cov, hit_raw_mis, hit_raw_cov, hit_weights, hit_outcomes = calculate_qscore_weighted_mismatches(
+        sam_hit, hit_seq, hit_qscore_stats
+    )
+    bg_weighted_mis, bg_weighted_cov, bg_raw_mis, bg_raw_cov, bg_weights, bg_outcomes = calculate_qscore_weighted_mismatches(
+        sam_plasmid, plasmid_seq, bg_qscore_stats
+    )
+    
+    # Calculate proper weighted sampling errors
+    hit_weighted_rate, hit_weighted_error = calculate_weighted_sampling_error(hit_weights, hit_outcomes)
+    bg_weighted_rate, bg_weighted_error = calculate_weighted_sampling_error(bg_weights, bg_outcomes)
+    
+    # Net weighted rate
+    net_weighted_rate = max(hit_weighted_rate - bg_weighted_rate, 0.0)
+    net_weighted_error = np.sqrt(hit_weighted_error**2 + bg_weighted_error**2)
+    
+    logging.info(f"   Hit weighted rate: {hit_weighted_rate:.6f} ± {hit_weighted_error:.6f}")
+    logging.info(f"   Background weighted rate: {bg_weighted_rate:.6f} ± {bg_weighted_error:.6f}")
+    logging.info(f"   Net weighted rate: {net_weighted_rate:.6f} ± {net_weighted_error:.6f}")
+    
+    # 5. Calculate AA mutations per gene (simplified - no Monte Carlo)
+    logging.info("5. Calculating AA mutations per gene from weighted rates...")
+    lambda_bp_weighted = net_weighted_rate * len(cds_seq)
+    lambda_error_weighted = net_weighted_error * len(cds_seq)
+    
+    # Simple AA mutation estimate (mean of Poisson distribution)
+    mean_aa = lambda_bp_weighted / 3.0  # Approximate: 3 bp per AA
+    std_aa = np.sqrt(lambda_bp_weighted) / 3.0  # Standard deviation of Poisson
+    
+    logging.info(f"   Lambda_bp (weighted): {lambda_bp_weighted:.6f} ± {lambda_error_weighted:.6f}")
+    logging.info(f"   AA mutations per gene: {mean_aa:.4f} ± {std_aa:.4f}")
+    
+    # 6. Bootstrap confidence intervals
+    logging.info("6. Calculating bootstrap confidence intervals (1,000 resamples)...")
+    bootstrap_mean, ci_lower, ci_upper, bootstrap_dist = bootstrap_aa_mutations(
+        hit_mis, hit_cov, bg_mis, bg_cov, cds_seq
+    )
+    logging.info(f"   Bootstrap 95% CI: [{ci_lower:.4f}, {ci_upper:.4f}]")
+    
+    # 7. Alignment error estimation
+    logging.info("7. Calculating alignment error estimation...")
+    alignment_error = 1.0 / np.sqrt(hit_cov) if hit_cov > 0 else 1.0
+    logging.info(f"   Alignment error: {alignment_error:.6f}")
+    
+    # 8. Q-score uncertainty factors
+    logging.info("8. Calculating Q-score uncertainty factors...")
+    hit_qscore_uncertainty = qscore_uncertainty_factor(hit_qscore_stats['mean_qscore']) if hit_qscore_stats else 0.0
+    bg_qscore_uncertainty = qscore_uncertainty_factor(bg_qscore_stats['mean_qscore']) if bg_qscore_stats else 0.0
+    logging.info(f"   Hit Q-score uncertainty: {hit_qscore_uncertainty:.6f}")
+    logging.info(f"   Background Q-score uncertainty: {bg_qscore_uncertainty:.6f}")
+    
+    results = {
+        'mean_aa_mutations': mean_aa,
+        'std_aa_mutations': std_aa,
+        'ci_lower': ci_lower,
+        'ci_upper': ci_upper,
+        'hit_rate': hit_mis / hit_cov if hit_cov > 0 else 0,
+        'hit_rate_ci': hit_rate_ci,
+        'bg_rate': bg_mis / bg_cov if bg_cov > 0 else 0,
+        'bg_rate_ci': bg_rate_ci,
+        'net_rate': net_rate,
+        'net_rate_error': net_rate_error,
+        'lambda_bp': lambda_bp,
+        'lambda_error': lambda_error,
+        'alignment_error': alignment_error,
+        'hit_qscore_uncertainty': hit_qscore_uncertainty,
+        'bg_qscore_uncertainty': bg_qscore_uncertainty,
+        'hit_qscore_stats': hit_qscore_stats,
+        'bg_qscore_stats': bg_qscore_stats,
+        'bootstrap_distribution': bootstrap_dist,
+        'quality_threshold': quality_threshold,
+        'mappable_bases': hit_cov,
+        # Q-score weighted results
+        'hit_weighted_rate': hit_weighted_rate,
+        'hit_weighted_error': hit_weighted_error,
+        'bg_weighted_rate': bg_weighted_rate,
+        'bg_weighted_error': bg_weighted_error,
+        'net_weighted_rate': net_weighted_rate,
+        'net_weighted_error': net_weighted_error,
+        'lambda_bp_weighted': lambda_bp_weighted,
+        'lambda_error_weighted': lambda_error_weighted,
+        'hit_weighted_mismatches': hit_weighted_mis,
+        'hit_weighted_coverage': hit_weighted_cov,
+        'bg_weighted_mismatches': bg_weighted_mis,
+        'bg_weighted_coverage': bg_weighted_cov
+    }
+    
+    if quality_threshold is not None:
+        qscore_info = ""
+        if hit_qscore_stats:
+            qscore_info = f", hit_qscore={hit_qscore_stats['mean_qscore']:.1f}±{hit_qscore_stats['std_qscore']:.1f}"
+        if bg_qscore_stats:
+            qscore_info += f", bg_qscore={bg_qscore_stats['mean_qscore']:.1f}±{bg_qscore_stats['std_qscore']:.1f}"
+        
+        logging.info(f"Quality {quality_threshold}: AA mutations = {mean_aa:.4f} ± {std_aa:.4f} "
+                    f"(95% CI: [{ci_lower:.4f}, {ci_upper:.4f}]), "
+                    f"mappable_bases={hit_cov}, net_rate={net_rate:.6f}±{net_rate_error:.6f}{qscore_info}")
+    
+    return results
 
 def simulate_aa_distribution(lambda_bp, cds_seq, n_trials=1000):
     """
@@ -634,12 +1818,39 @@ def process_single_fastq(fastq_path, master_summary_path):
     chunk_sizes = [len(chunk) for chunk in chunks]
     logging.info(f"Chunk sizes: {chunk_sizes} bp")
 
+    # ----------------------------
+    # RUN QC ANALYSIS FIRST TO DETERMINE OPTIMAL Q-SCORE
+    # ----------------------------
+    logging.info("Running QC analysis to determine optimal Q-score...")
+    optimal_qscore = None
+    try:
+        optimal_qscore = run_qc_analysis(fastq_path, results_dir)
+        if optimal_qscore is not None:
+            logging.info(f"QC analysis completed successfully. Optimal Q-score: {optimal_qscore}")
+        else:
+            logging.warning("QC analysis completed but no optimal Q-score determined. Using unfiltered data.")
+    except Exception as e:
+        logging.error(f"QC analysis failed: {e}")
+        logging.warning("Using unfiltered data for main analysis.")
+        # Don't fail the entire analysis if QC fails
+
+    # Apply optimal Q-score filtering if available
+    filtered_fastq_path = fastq_path
+    if optimal_qscore is not None:
+        logging.info(f"Applying Q{optimal_qscore} filtering to main analysis...")
+        filtered_fastq_path = os.path.join(work_dir, f"{sample_name}_q{optimal_qscore}.fastq.gz")
+        if not run_nanofilt_filtering(fastq_path, optimal_qscore, filtered_fastq_path):
+            logging.warning(f"Failed to apply Q{optimal_qscore} filtering. Using unfiltered data.")
+            filtered_fastq_path = fastq_path
+        else:
+            logging.info(f"Successfully applied Q{optimal_qscore} filtering. Using filtered data for main analysis.")
+
     # Write chunks FASTA & align to background‐chunks
     chunks_fasta = create_multi_fasta(chunks, work_dir)
-    sam_chunks   = run_minimap2(fastq_path, chunks_fasta, "plasmid_chunks_alignment", work_dir)
+    sam_chunks   = run_minimap2(filtered_fastq_path, chunks_fasta, "plasmid_chunks_alignment", work_dir)
 
     # Align to hit (target) alone
-    sam_hit = run_minimap2(fastq_path, ref_hit_fasta, "hit_alignment", work_dir)
+    sam_hit = run_minimap2(filtered_fastq_path, ref_hit_fasta, "hit_alignment", work_dir)
 
     # Compute mismatch stats for background chunks (for reference, but not used for background rate)
     chunk_refs      = { f"chunk_{i+1}": seq for i, seq in enumerate(chunks) }
@@ -667,7 +1878,7 @@ def process_single_fastq(fastq_path, master_summary_path):
     # ----------------------------
     # ALIGN TO FULL PLASMID TO GET COVERAGE
     # ----------------------------
-    sam_plasmid = run_minimap2(fastq_path, plasmid_fasta, "plasmid_full_alignment", work_dir)
+    sam_plasmid = run_minimap2(filtered_fastq_path, plasmid_fasta, "plasmid_full_alignment", work_dir)
 
     # Calculate background rate from full plasmid alignment, excluding target region
     # This avoids artificial junction mismatches from concatenated chunks
@@ -868,7 +2079,10 @@ def process_single_fastq(fastq_path, master_summary_path):
     ax0.plot(positions_gene, hit_info["pos_rates"],
              color="#2E8B57", linestyle='-', marker='o', markersize=4, alpha=0.8,
              label="Hit mismatch rate")
-    ax0.set_title("Mismatch Rate per Position: Gene of Interest", fontsize=14, fontweight='bold')
+    
+    # Add Q-score information to title
+    qscore_info = f" (Q{optimal_qscore} filtered)" if optimal_qscore is not None else " (unfiltered)"
+    ax0.set_title(f"Mismatch Rate per Position: Gene of Interest{qscore_info}", fontsize=14, fontweight='bold')
     ax0.set_xlabel("Position (bp)", fontsize=12)
     ax0.set_ylabel("Mismatch Rate", fontsize=12)
     ax0.tick_params(axis='both', which='major', labelsize=10, direction='in', length=6)
@@ -886,7 +2100,7 @@ def process_single_fastq(fastq_path, master_summary_path):
     ax1.plot(rolling_positions, rolling_rates,
              color="#FF6B6B", linestyle='-', linewidth=2, alpha=0.8,
              label="Rolling average (20 bp)")
-    ax1.set_title("Rolling Mutation Rate Across Plasmid (20 bp Window)", fontsize=14, fontweight='bold')
+    ax1.set_title(f"Rolling Mutation Rate Across Plasmid (20 bp Window){qscore_info}", fontsize=14, fontweight='bold')
     ax1.set_xlabel("Position on Plasmid (bp)", fontsize=12)
     ax1.set_ylabel("Mismatch Rate", fontsize=12)
     ax1.tick_params(axis='both', which='major', labelsize=10, direction='in', length=6)
@@ -904,7 +2118,7 @@ def process_single_fastq(fastq_path, master_summary_path):
     plasmid_positions = np.arange(1, len(plasmid_cov) + 1)
     ax2.plot(plasmid_positions, plasmid_cov,
              linestyle='-', color='black', linewidth=1.0, alpha=0.8, label="Coverage")
-    ax2.set_title("Full Plasmid Coverage with ROI Shaded", fontsize=14, fontweight='bold')
+    ax2.set_title(f"Full Plasmid Coverage with ROI Shaded{qscore_info}", fontsize=14, fontweight='bold')
     ax2.set_xlabel("Position on Plasmid", fontsize=12)
     ax2.set_ylabel("Coverage (# reads)", fontsize=12)
     ax2.tick_params(axis='both', which='major', labelsize=10, direction='in', length=6)
@@ -1107,8 +2321,9 @@ def process_single_fastq(fastq_path, master_summary_path):
         txtf.write(f"   • {panel_path_png} (figure)\n")
         txtf.write(f"   • {panel_path_pdf} (figure)\n")
         txtf.write(f"   • {pdf_path} (mutation spectrum table)\n")
-        txtf.write(f"   • qc_mutation_rate_vs_quality.png (QC plot)\n")
-        txtf.write(f"   • qc_mutation_rate_vs_quality.csv (QC data)\n")
+        txtf.write(f"   • comprehensive_qc_analysis.png (Comprehensive QC plot with error bars)\n")
+        txtf.write(f"   • error_analysis.png (Detailed error analysis plots)\n")
+        txtf.write(f"   • comprehensive_qc_data.csv (Comprehensive QC data with error estimates)\n")
 
     logging.info(f"Wrote per-sample summary to: {sample_summary_path}")
 
@@ -1126,17 +2341,6 @@ def process_single_fastq(fastq_path, master_summary_path):
             f"{est_mut_per_copy:.6e}\t"
             f"{is_protein}\n"
         )
-
-    # ----------------------------
-    # RUN QC ANALYSIS WITH QUALITY SCORE FILTERING
-    # ----------------------------
-    logging.info("Running QC analysis with quality score filtering...")
-    try:
-        run_qc_analysis(fastq_path, results_dir)
-        logging.info("QC analysis completed successfully")
-    except Exception as e:
-        logging.error(f"QC analysis failed: {e}")
-        # Don't fail the entire analysis if QC fails
 
     # ----------------------------
     # CLEAN UP: remove this sample's work_dir entirely

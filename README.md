@@ -146,7 +146,7 @@ This code has been experimentally validated for simultaneous cloning of tens of 
 - Place `.fastq.gz` files in `/data/ep-library-profile/`.
 - Provide the mutational region of interest (`/data/ep-library-profile/region_of_interest.fasta`) and the whole plasmid (`/data/ep-library-profile/plasmid.fasta`).
 - Run `make ep-library-profile`.
-- Outputs include coverage, mutation rate, spectrum, and occurrence rates of specific mutations, all saved in `results/ep-library-profile/` along with a log file.
+- Outputs include coverage, mutation rate, spectrum, and associated error, all saved in `results/ep-library-profile/` along with a log file.
 
 ---
 
