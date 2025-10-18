@@ -97,6 +97,8 @@ For long-read sequencing libraries tagged with UMIs:
 
 ## Making Mutant Proteins with SLIM
 
+
+- This is a quick tool to design primers for SLIM cloning, which can add mutations to specific spots in a protein with overnight ease.
 - Add your gene template (coding sequence only) to `data/design_slim/slim_template_gene.fasta` and your whole plasmid to `data/design_slim/slim_context.fasta`.
 - Specify mutants in `data/design_slim/slim_target_mutations.csv` (first column: `mutations`).
 - The script outputs designed primers to `results/design_slim/SLIM_primers.csv`.
@@ -108,6 +110,17 @@ For long-read sequencing libraries tagged with UMIs:
 - Insertion after codon: `T241TS` (insert Ser after Thr241)
 - Codon replacement insertion: `L46GP` (replace Leu46 with Gly-Pro)
 
+**Experimental:**
+Total time:
+~ 3h hands-on (not inc. protein purification), 72h DNA -> pure mutant protein
+
+Contributions:
+2x PCRs (~2h + 10 mins setup), SLIM thermocycling (50 mins), transformation (30 mins setup + overnight incubation), colony growth (5 mins hands-on, 12 h growth), DNA recovery (important for validation, 30 mins hands-on), protein expression and purification (2x overnight)
+
+SLIM protocol:
+Once you have the primers, run two normal PCRs using (A) long fwd + short rvs and (B) long rvs + short fwd. You can then add 10 ul of each PCR product to 10 ul of H-buffer, composed of 150 mM Tris pH 8, 400 mM NaCl and 60 mM EDTA. Incubate this (total volume 30 ul) in a thermocycler using the following protocol: 99 oC, 3:00 -> 2x [65 oC, 5:00 -> 30 oC, 15:00] -> Hold at 4 oC. You may then transform either NEB 5a or BL21 (DE3) with this mixture without further purification.
+
+This code has been experimentally validated for simultaneous cloning of tens of mutants.
 ---
 
 ## Making Mutant Proteins with Gibson Assembly

@@ -100,6 +100,95 @@ def create_multi_fasta(chunks, work_dir, out_fasta_prefix="plasmid_chunks"):
             f.write(str(seq) + "\n")
     return out_fasta
 
+def calculate_background_from_plasmid(sam_plasmid, plasmid_seq, target_start, target_length):
+    """
+    Calculate background mismatch statistics from full plasmid alignment, excluding target region.
+    
+    Args:
+        sam_plasmid: Path to SAM file with full plasmid alignment
+        plasmid_seq: Full plasmid sequence
+        target_start: Start position of target region (0-based)
+        target_length: Length of target region
+    
+    Returns:
+        tuple: (total_mismatches, total_covered_bases, mapped_reads)
+    """
+    target_end = target_start + target_length
+    
+    # Initialize counters
+    total_mismatches = 0
+    total_covered_bases = 0
+    mapped_reads = 0
+    
+    samfile = pysam.AlignmentFile(sam_plasmid, "r")
+    for read in samfile.fetch():
+        if read.is_unmapped or read.query_sequence is None:
+            continue
+        
+        mapped_reads += 1
+        
+        for read_pos, ref_pos in read.get_aligned_pairs(matches_only=False):
+            if read_pos is not None and ref_pos is not None and 0 <= ref_pos < len(plasmid_seq):
+                # Skip positions within the target region
+                if target_start <= ref_pos < target_end:
+                    continue
+                
+                total_covered_bases += 1
+                if read.query_sequence[read_pos].upper() != plasmid_seq[ref_pos].upper():
+                    total_mismatches += 1
+    
+    samfile.close()
+    
+    return total_mismatches, total_covered_bases, mapped_reads
+
+def calculate_rolling_mutation_rate_plasmid(sam_plasmid, plasmid_seq, window_size=20):
+    """
+    Calculate rolling mutation rate across the entire plasmid with a specified window size.
+    
+    Args:
+        sam_plasmid: Path to SAM file with full plasmid alignment
+        plasmid_seq: Full plasmid sequence
+        window_size: Size of the rolling window (default: 20 bp)
+    
+    Returns:
+        tuple: (positions, rolling_rates) for the entire plasmid
+    """
+    # Calculate per-position mutation rates for the entire plasmid
+    plasmid_mismatches = [0] * len(plasmid_seq)
+    plasmid_coverage = [0] * len(plasmid_seq)
+    
+    samfile = pysam.AlignmentFile(sam_plasmid, "r")
+    for read in samfile.fetch():
+        if read.is_unmapped or read.query_sequence is None:
+            continue
+        
+        for read_pos, ref_pos in read.get_aligned_pairs(matches_only=False):
+            if read_pos is not None and ref_pos is not None and 0 <= ref_pos < len(plasmid_seq):
+                plasmid_coverage[ref_pos] += 1
+                if read.query_sequence[read_pos].upper() != plasmid_seq[ref_pos].upper():
+                    plasmid_mismatches[ref_pos] += 1
+    
+    samfile.close()
+    
+    # Calculate per-position mutation rates
+    plasmid_rates = []
+    for cov, mis in zip(plasmid_coverage, plasmid_mismatches):
+        if cov > 0:
+            plasmid_rates.append(mis / cov)
+        else:
+            plasmid_rates.append(0.0)
+    
+    # Calculate rolling average
+    rolling_rates = []
+    positions = []
+    
+    for i in range(len(plasmid_rates) - window_size + 1):
+        window_rates = plasmid_rates[i:i + window_size]
+        rolling_rates.append(np.mean(window_rates))
+        positions.append(i + window_size // 2 + 1)  # Center position of window
+    
+    return positions, rolling_rates
+
 def compute_mismatch_stats_sam(sam_file, refs_dict):
     """
     For each reference in refs_dict:
@@ -271,21 +360,43 @@ def process_single_fastq(fastq_path, master_summary_path):
     hit_seq, hit_id         = load_single_sequence(ref_hit_fasta)
     plasmid_seq, plasmid_id = load_single_sequence(plasmid_fasta)
 
-    # Remove hit region from plasmid → “background plasmid”
-    idx = plasmid_seq.find(hit_seq)
+    logging.info(f"Plasmid length: {len(plasmid_seq)} bp")
+    logging.info(f"Gene of interest length: {len(hit_seq)} bp")
+
+    # Remove hit region from plasmid → "background plasmid"
+    # Use case-insensitive search to find the hit sequence in the plasmid
+    idx = plasmid_seq.upper().find(hit_seq.upper())
     if idx == -1:
         logging.error("Gene region not found in plasmid")
         return
     plasmid_no_gene = plasmid_seq[:idx] + plasmid_seq[idx + len(hit_seq):]
+    
+    logging.info(f"Gene found at position {idx+1}-{idx+len(hit_seq)} (1-based)")
+    logging.info(f"Background region length: {len(plasmid_no_gene)} bp")
 
     # Chunk the background plasmid into N pieces
     n_chunks = 10
     length   = len(plasmid_no_gene)
     size     = length // n_chunks
+    
+    # Check if chunks would be too small and adjust accordingly
+    # Minimum chunk size ensures sufficient data for reliable alignment and statistics
+    # 50 bp minimum provides better alignment performance with minimap2
+    min_chunk_size = 50
+    if size < min_chunk_size:
+        logging.warning(f"Background region ({length} bp) would create chunks smaller than {min_chunk_size} bp. Adjusting chunk count.")
+        n_chunks = max(1, length // min_chunk_size)
+        size = length // n_chunks
+        logging.info(f"Adjusted to {n_chunks} chunks of approximately {size} bp each")
+    
     chunks   = [
         plasmid_no_gene[i * size : (length if i == n_chunks - 1 else (i + 1) * size)]
         for i in range(n_chunks)
     ]
+    
+    # Log chunk sizes for debugging
+    chunk_sizes = [len(chunk) for chunk in chunks]
+    logging.info(f"Chunk sizes: {chunk_sizes} bp")
 
     # Write chunks FASTA & align to background‐chunks
     chunks_fasta = create_multi_fasta(chunks, work_dir)
@@ -294,19 +405,42 @@ def process_single_fastq(fastq_path, master_summary_path):
     # Align to hit (target) alone
     sam_hit = run_minimap2(fastq_path, ref_hit_fasta, "hit_alignment", work_dir)
 
-    # Compute mismatch stats for background chunks
+    # Compute mismatch stats for background chunks (for reference, but not used for background rate)
     chunk_refs      = { f"chunk_{i+1}": seq for i, seq in enumerate(chunks) }
     mismatch_chunks = compute_mismatch_stats_sam(sam_chunks, chunk_refs)
 
-    # Summarize across all chunks → background totals
-    bg_mis   = sum(info["total_mismatches"]    for info in mismatch_chunks.values())
-    bg_cov   = sum(info["total_covered_bases"]  for info in mismatch_chunks.values())
-    bg_reads = sum(info["mapped_reads"]         for info in mismatch_chunks.values())
+    # ----------------------------
+    # COMPUTE BASE DISTRIBUTION AT EACH POSITION OF HIT
+    # ----------------------------
+    base_counts = [
+        {"A": 0, "C": 0, "G": 0, "T": 0, "N": 0}
+        for _ in range(len(hit_seq))
+    ]
+    samfile_hit = pysam.AlignmentFile(sam_hit, "r")
+    for read in samfile_hit.fetch():
+        if read.is_unmapped or read.query_sequence is None:
+            continue
+        for read_pos, ref_pos in read.get_aligned_pairs(matches_only=False):
+            if read_pos is not None and ref_pos is not None and 0 <= ref_pos < len(hit_seq):
+                base = read.query_sequence[read_pos].upper()
+                if base not in {"A", "C", "G", "T"}:
+                    base = "N"
+                base_counts[ref_pos][base] += 1
+    samfile_hit.close()
+
+    # ----------------------------
+    # ALIGN TO FULL PLASMID TO GET COVERAGE
+    # ----------------------------
+    sam_plasmid = run_minimap2(fastq_path, plasmid_fasta, "plasmid_full_alignment", work_dir)
+
+    # Calculate background rate from full plasmid alignment, excluding target region
+    # This avoids artificial junction mismatches from concatenated chunks
+    bg_mis, bg_cov, bg_reads = calculate_background_from_plasmid(sam_plasmid, plasmid_seq, idx, len(hit_seq))
     bg_rate  = (bg_mis / bg_cov) if bg_cov else 0.0       # raw per‐base
     bg_rate_per_kb = bg_rate * 1e3
 
     logging.info(
-        f"Background (all chunks): total_mismatches={bg_mis}, "
+        f"Background (plasmid excluding target): total_mismatches={bg_mis}, "
         f"covered_bases={bg_cov}, mapped_reads={bg_reads}, "
         f"rate_per_kb={bg_rate_per_kb:.4f}"
     )
@@ -329,7 +463,7 @@ def process_single_fastq(fastq_path, master_summary_path):
     # Two‐proportion Z‐test: is target rate > background rate?
     z_stat, p_val = z_test_two_proportions(hit_mis, hit_cov, bg_mis, bg_cov)
 
-    # Compute “Estimated mutations per target copy (basepairs)” (float)
+    # Compute "Estimated mutations per target copy (basepairs)" (float)
     length_of_target = len(hit_seq)
     true_diff_rate   = hit_rate - bg_rate
     est_mut_per_copy = max(true_diff_rate * length_of_target, 0.0)
@@ -354,30 +488,33 @@ def process_single_fastq(fastq_path, master_summary_path):
     # If protein, simulate AA distribution per copy using Poisson sampling
     if is_protein:
         logging.info(f"Simulating amino acid distribution with λ_bp={est_mut_per_copy:.2f}")
-        aa_diffs         = simulate_aa_distribution(est_mut_per_copy, hit_seq, n_trials=1000)
+        aa_diffs = simulate_aa_distribution(est_mut_per_copy, hit_seq, n_trials=1000)
         avg_aa_mutations = sum(aa_diffs) / len(aa_diffs)
+        
+        # Log simulation results for debugging
+        logging.info(f"AA simulation results: min={min(aa_diffs)}, max={max(aa_diffs)}, mean={avg_aa_mutations:.3f}")
+        logging.info(f"AA simulation distribution: {len([x for x in aa_diffs if x == 0])} zeros, {len([x for x in aa_diffs if x > 0])} non-zeros")
     else:
-        aa_diffs         = []
+        aa_diffs = []
         avg_aa_mutations = None
 
     # ----------------------------
-    # COMPUTE BASE DISTRIBUTION AT EACH POSITION OF HIT
+    # SAVE CSV FOR MUTATION RATES (PANEL 1)
     # ----------------------------
-    base_counts = [
-        {"A": 0, "C": 0, "G": 0, "T": 0, "N": 0}
-        for _ in range(len(hit_seq))
-    ]
-    samfile_hit = pysam.AlignmentFile(sam_hit, "r")
-    for read in samfile_hit.fetch():
-        if read.is_unmapped or read.query_sequence is None:
-            continue
-        for read_pos, ref_pos in read.get_aligned_pairs(matches_only=False):
-            if read_pos is not None and ref_pos is not None and 0 <= ref_pos < len(hit_seq):
-                base = read.query_sequence[read_pos].upper()
-                if base not in {"A", "C", "G", "T"}:
-                    base = "N"
-                base_counts[ref_pos][base] += 1
-    samfile_hit.close()
+    gene_mismatch_csv = os.path.join(results_dir, "gene_mismatch_rate.csv")
+    with open(gene_mismatch_csv, "w", newline="") as csvfile:
+        csvfile.write(f"# gene_id: {hit_id}\n")
+        csvfile.write(f"# background_rate_per_base: {bg_rate:.6f}\n")
+        csvfile.write(f"# background_rate_per_kb: {bg_rate_per_kb:.6f}\n")
+        if is_protein:
+            csvfile.write(f"# is_protein: True\n")
+        else:
+            csvfile.write(f"# is_protein: False\n")
+            csvfile.write(f"# protein_invalid_reasons: {'; '.join(reasons)}\n")
+        csvfile.write("position,mismatch_rate\n")
+        for pos, rate in enumerate(hit_info["pos_rates"], start=1):
+            csvfile.write(f"{pos},{rate:.6f}\n")
+    logging.info(f"Saved CSV for gene mismatch rates: {gene_mismatch_csv}")
 
     # ----------------------------
     # SAVE CSV FOR POSITIONS ABOVE BACKGROUND: BASE DISTRIBUTION
@@ -439,29 +576,6 @@ def process_single_fastq(fastq_path, master_summary_path):
                 csvfile.write(f"{nt_pos},{aa_pos},{ref_aa},{alt_aa},{rate_val:.6f}\n")
         logging.info(f"Saved CSV for amino acid substitution rates: {aa_subst_csv}")
 
-    # ----------------------------
-    # SAVE CSV FOR MUTATION RATES (PANEL 1)
-    # ----------------------------
-    gene_mismatch_csv = os.path.join(results_dir, "gene_mismatch_rate.csv")
-    with open(gene_mismatch_csv, "w", newline="") as csvfile:
-        csvfile.write(f"# gene_id: {hit_id}\n")
-        csvfile.write(f"# background_rate_per_base: {bg_rate:.6f}\n")
-        csvfile.write(f"# background_rate_per_kb: {bg_rate_per_kb:.6f}\n")
-        if is_protein:
-            csvfile.write(f"# is_protein: True\n")
-        else:
-            csvfile.write(f"# is_protein: False\n")
-            csvfile.write(f"# protein_invalid_reasons: {'; '.join(reasons)}\n")
-        csvfile.write("position,mismatch_rate\n")
-        for pos, rate in enumerate(hit_info["pos_rates"], start=1):
-            csvfile.write(f"{pos},{rate:.6f}\n")
-    logging.info(f"Saved CSV for gene mismatch rates: {gene_mismatch_csv}")
-
-    # ----------------------------
-    # ALIGN TO FULL PLASMID TO GET COVERAGE
-    # ----------------------------
-    sam_plasmid = run_minimap2(fastq_path, plasmid_fasta, "plasmid_full_alignment", work_dir)
-
     plasmid_cov = [0] * len(plasmid_seq)
     samfile_full = pysam.AlignmentFile(sam_plasmid, "r")
     for read in samfile_full.fetch():
@@ -503,15 +617,16 @@ def process_single_fastq(fastq_path, master_summary_path):
     logging.info(f"Saved CSV for AA mutation distribution: {aa_dist_csv}")
 
     # ----------------------------
-    # PREPARE PANEL FIGURE WITH 3 SUBPLOTS
+    # PREPARE PANEL FIGURE WITH 4 SUBPLOTS
     # ----------------------------
-    fig, axes = plt.subplots(1, 3, figsize=(18, 6), constrained_layout=True)
-    # axes[0]: Mutation rate over gene of interest
-    # axes[1]: Coverage of plasmid with ROI shaded
-    # axes[2]: KDE of AA mutations per copy
+    fig, axes = plt.subplots(2, 2, figsize=(18, 12), constrained_layout=True)
+    # axes[0,0]: Mutation rate over gene of interest
+    # axes[0,1]: Rolling mutation rate across plasmid (20 bp window)
+    # axes[1,0]: Coverage of plasmid with ROI shaded
+    # axes[1,1]: KDE of AA mutations per copy
 
     # --- Panel 1: Mutation rate over gene of interest ---
-    ax0 = axes[0]
+    ax0 = axes[0, 0]
     positions_gene = np.arange(1, len(hit_info["pos_rates"]) + 1)
     ax0.axhspan(0, bg_rate, color='gray', alpha=0.3, label="Background rate")
     ax0.plot(positions_gene, hit_info["pos_rates"],
@@ -526,53 +641,103 @@ def process_single_fastq(fastq_path, master_summary_path):
     ax0.spines['right'].set_visible(False)
     ax0.legend(loc="upper right", frameon=False, fontsize=10)
 
-    # --- Panel 2: Coverage of plasmid with ROI shaded ---
-    ax1 = axes[1]
-    plasmid_positions = np.arange(1, len(plasmid_cov) + 1)
-    ax1.plot(plasmid_positions, plasmid_cov,
-             linestyle='-', color='black', linewidth=1.0, alpha=0.8, label="Coverage")
-    ax1.set_title("Full Plasmid Coverage with ROI Shaded", fontsize=14, fontweight='bold')
-    ax1.set_xlabel("Position on Plasmid", fontsize=12)
-    ax1.set_ylabel("Coverage (# reads)", fontsize=12)
+    # --- Panel 2: Rolling mutation rate across plasmid (20 bp window) ---
+    ax1 = axes[0, 1]
+    rolling_positions, rolling_rates = calculate_rolling_mutation_rate_plasmid(
+        sam_plasmid, plasmid_seq, window_size=20
+    )
+    ax1.axhspan(0, bg_rate, color='gray', alpha=0.3, label="Background rate")
+    ax1.plot(rolling_positions, rolling_rates,
+             color="#FF6B6B", linestyle='-', linewidth=2, alpha=0.8,
+             label="Rolling average (20 bp)")
+    ax1.set_title("Rolling Mutation Rate Across Plasmid (20 bp Window)", fontsize=14, fontweight='bold')
+    ax1.set_xlabel("Position on Plasmid (bp)", fontsize=12)
+    ax1.set_ylabel("Mismatch Rate", fontsize=12)
     ax1.tick_params(axis='both', which='major', labelsize=10, direction='in', length=6)
     ax1.tick_params(axis='both', which='minor', direction='in', length=3)
     ax1.spines['top'].set_visible(False)
     ax1.spines['right'].set_visible(False)
+    ax1.legend(loc="upper right", frameon=False, fontsize=10)
+    # Shade the ROI region
     start_roi = idx + 1
-    end_roi   = idx + len(hit_seq)
+    end_roi = idx + len(hit_seq)
     ax1.axvspan(start_roi, end_roi, color='gray', alpha=0.3, label=f"ROI: {start_roi}–{end_roi}")
 
-    # --- Panel 3: KDE of AA mutations per copy ---
-    ax2 = axes[2]
-    if is_protein and aa_diffs:
+    # --- Panel 3: Coverage of plasmid with ROI shaded ---
+    ax2 = axes[1, 0]
+    plasmid_positions = np.arange(1, len(plasmid_cov) + 1)
+    ax2.plot(plasmid_positions, plasmid_cov,
+             linestyle='-', color='black', linewidth=1.0, alpha=0.8, label="Coverage")
+    ax2.set_title("Full Plasmid Coverage with ROI Shaded", fontsize=14, fontweight='bold')
+    ax2.set_xlabel("Position on Plasmid", fontsize=12)
+    ax2.set_ylabel("Coverage (# reads)", fontsize=12)
+    ax2.tick_params(axis='both', which='major', labelsize=10, direction='in', length=6)
+    ax2.tick_params(axis='both', which='minor', direction='in', length=3)
+    ax2.spines['top'].set_visible(False)
+    ax2.spines['right'].set_visible(False)
+    start_roi = idx + 1
+    end_roi   = idx + len(hit_seq)
+    ax2.axvspan(start_roi, end_roi, color='gray', alpha=0.3, label=f"ROI: {start_roi}–{end_roi}")
+
+    # --- Panel 4: KDE of AA mutations per copy ---
+    ax3 = axes[1, 1]
+    if is_protein and aa_diffs and len(aa_diffs) > 0:
         x_vals = np.array(aa_diffs)
-        if HAVE_SCIPY and len(np.unique(x_vals)) > 1:
-            kde = gaussian_kde(x_vals)
-            x_grid = np.linspace(0, max(x_vals), 200)
-            ax2.plot(x_grid, kde(x_grid),
-                     color="#C44E52", linewidth=2.0, alpha=0.8, label="KDE")
-            ax2.fill_between(x_grid, kde(x_grid), color="#C44E52", alpha=0.3)
-            ax2.set_ylim(bottom=0)
+        unique_vals = np.unique(x_vals)
+        
+        if len(unique_vals) > 1:
+            # Multiple unique values - use KDE or histogram
+            if HAVE_SCIPY:
+                try:
+                    kde = gaussian_kde(x_vals)
+                    x_grid = np.linspace(0, max(x_vals), 200)
+                    kde_values = kde(x_grid)
+                    ax3.plot(x_grid, kde_values,
+                             color="#C44E52", linewidth=2.0, alpha=0.8, label="KDE")
+                    ax3.fill_between(x_grid, kde_values, color="#C44E52", alpha=0.3)
+                    ax3.set_ylim(bottom=0)
+                except Exception as e:
+                    logging.warning(f"KDE failed, using histogram: {e}")
+                    # Fallback to histogram
+                    ax3.hist(x_vals, bins=range(0, max(x_vals) + 2), density=True,
+                             color="#C44E52", alpha=0.6, edgecolor='black', label="Histogram")
+            else:
+                # No scipy - use histogram
+                ax3.hist(x_vals, bins=range(0, max(x_vals) + 2), density=True,
+                         color="#C44E52", alpha=0.6, edgecolor='black', label="Histogram")
         else:
-            ax2.hist(x_vals, bins=range(0, max(x_vals) + 2), density=True,
-                     color="#C44E52", alpha=0.6, edgecolor='black', label="Histogram")
-        ax2.set_title("Distribution of Amino Acid Mutations per Gene", fontsize=14, fontweight='bold')
-        ax2.set_xlabel("Number of AA Mutations", fontsize=12)
-        ax2.set_ylabel("Density", fontsize=12)
-        ax2.tick_params(axis='both', which='major', labelsize=10, direction='in', length=6)
-        ax2.tick_params(axis='both', which='minor', direction='in', length=3)
-        ax2.spines['top'].set_visible(False)
-        ax2.spines['right'].set_visible(False)
+            # All values are the same - show a single bar
+            single_val = unique_vals[0]
+            ax3.bar(single_val, 1.0, width=0.8, color="#C44E52", alpha=0.6, 
+                   edgecolor='black', label=f"All trials: {single_val} mutations")
+            ax3.set_xlim(single_val - 1, single_val + 1)
+            ax3.set_ylim(0, 1.2)
+        
+        ax3.set_title("Distribution of Amino Acid Mutations per Gene", fontsize=14, fontweight='bold')
+        ax3.set_xlabel("Number of AA Mutations", fontsize=12)
+        ax3.set_ylabel("Density", fontsize=12)
+        ax3.tick_params(axis='both', which='major', labelsize=10, direction='in', length=6)
+        ax3.tick_params(axis='both', which='minor', direction='in', length=3)
+        ax3.spines['top'].set_visible(False)
+        ax3.spines['right'].set_visible(False)
     else:
-        ax2.text(0.5, 0.5, "Not a protein‐coding region", horizontalalignment='center',
-                 verticalalignment='center', fontsize=12, color='gray', transform=ax2.transAxes)
-        ax2.set_title("AA Mutation Distribution", fontsize=14, fontweight='bold')
-        ax2.set_xlabel("Number of AA Mutations", fontsize=12)
-        ax2.set_ylabel("Density", fontsize=12)
-        ax2.spines['top'].set_visible(False)
-        ax2.spines['right'].set_visible(False)
-        ax2.set_xticks([])
-        ax2.set_yticks([])
+        # Not protein-coding or no data
+        if is_protein:
+            ax3.text(0.5, 0.5, "No AA simulation data\n(λ_bp may be too low)", 
+                     horizontalalignment='center', verticalalignment='center', 
+                     fontsize=12, color='gray', transform=ax3.transAxes)
+        else:
+            ax3.text(0.5, 0.5, "Not a protein‐coding region", 
+                     horizontalalignment='center', verticalalignment='center', 
+                     fontsize=12, color='gray', transform=ax3.transAxes)
+        
+        ax3.set_title("AA Mutation Distribution", fontsize=14, fontweight='bold')
+        ax3.set_xlabel("Number of AA Mutations", fontsize=12)
+        ax3.set_ylabel("Density", fontsize=12)
+        ax3.spines['top'].set_visible(False)
+        ax3.spines['right'].set_visible(False)
+        ax3.set_xticks([])
+        ax3.set_yticks([])
 
     # Save the combined figure as both PNG and PDF
     panel_path_png = os.path.join(results_dir, "summary_panels.png")
@@ -669,7 +834,7 @@ def process_single_fastq(fastq_path, master_summary_path):
     with open(sample_summary_path, "w") as txtf:
         txtf.write(f"Sample: {sample_name}\n")
         txtf.write(f"{'=' * (8 + len(sample_name))}\n\n")
-        txtf.write("1) Background (all chunks):\n")
+        txtf.write("1) Background (plasmid excluding target):\n")
         txtf.write(f"   • Total mismatches:    {bg_mis}\n")
         txtf.write(f"   • Total covered bases: {bg_cov}\n")
         txtf.write(f"   • Mapped reads:        {bg_reads}\n")
