@@ -13,6 +13,8 @@ from Bio import SeqIO
 from Bio.Seq import Seq
 import matplotlib.pyplot as plt
 import math
+import tempfile
+from pathlib import Path
 
 # Use a built-in Matplotlib style ("ggplot") for consistency
 plt.style.use("ggplot")
@@ -293,6 +295,240 @@ def z_test_two_proportions(mis1, cov1, mis2, cov2):
         logging.info(f"Z‐test: z={z_stat:.4f}, p‐value=(scipy unavailable)")
 
     return z_stat, p_val
+
+def run_nanofilt_filtering(input_fastq, quality_threshold, output_fastq):
+    """
+    Run NanoFilt to filter FASTQ file by quality score threshold.
+    
+    Args:
+        input_fastq: Path to input FASTQ.gz file
+        quality_threshold: Quality score threshold (integer)
+        output_fastq: Path to output filtered FASTQ.gz file
+    
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    try:
+        # Use gunzip to decompress, pipe to NanoFilt, then compress output
+        cmd = f"gunzip -c {input_fastq} | NanoFilt -q {quality_threshold} | gzip > {output_fastq}"
+        logging.info(f"Running NanoFilt with quality threshold {quality_threshold}: {cmd}")
+        
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        if result.returncode != 0:
+            logging.error(f"NanoFilt failed with return code {result.returncode}: {result.stderr}")
+            return False
+        
+        # Check if output file was created and has content
+        if os.path.exists(output_fastq) and os.path.getsize(output_fastq) > 0:
+            logging.info(f"Successfully created filtered FASTQ: {output_fastq}")
+            return True
+        else:
+            logging.error(f"Output file {output_fastq} was not created or is empty")
+            return False
+            
+    except Exception as e:
+        logging.error(f"Error running NanoFilt: {e}")
+        return False
+
+def calculate_mutation_rate_for_quality(fastq_path, quality_threshold, work_dir, ref_hit_fasta, plasmid_fasta):
+    """
+    Calculate mutation rate and AA mutations per gene for a specific quality threshold.
+    
+    Args:
+        fastq_path: Path to input FASTQ.gz file
+        quality_threshold: Quality score threshold
+        work_dir: Working directory for temporary files
+        ref_hit_fasta: Path to reference hit FASTA
+        plasmid_fasta: Path to plasmid FASTA
+    
+    Returns:
+        tuple: (aa_mutations_per_gene, mappable_reads, success_flag) or (None, None, False) if failed
+    """
+    try:
+        # Create filtered FASTQ file
+        filtered_fastq = os.path.join(work_dir, f"filtered_q{quality_threshold}.fastq.gz")
+        
+        if not run_nanofilt_filtering(fastq_path, quality_threshold, filtered_fastq):
+            return None, None, False
+        
+        # Load sequences
+        hit_seq, hit_id = load_single_sequence(ref_hit_fasta)
+        plasmid_seq, plasmid_id = load_single_sequence(plasmid_fasta)
+        
+        # Find hit region in plasmid
+        idx = plasmid_seq.upper().find(hit_seq.upper())
+        if idx == -1:
+            logging.error("Gene region not found in plasmid")
+            return None, None, False
+        
+        # Align filtered reads to hit region
+        sam_hit = run_minimap2(filtered_fastq, ref_hit_fasta, f"hit_q{quality_threshold}", work_dir)
+        
+        # Align filtered reads to full plasmid for background calculation
+        sam_plasmid = run_minimap2(filtered_fastq, plasmid_fasta, f"plasmid_q{quality_threshold}", work_dir)
+        
+        # Calculate background rate from full plasmid alignment, excluding target region
+        bg_mis, bg_cov, bg_reads = calculate_background_from_plasmid(sam_plasmid, plasmid_seq, idx, len(hit_seq))
+        bg_rate = (bg_mis / bg_cov) if bg_cov else 0.0
+        
+        # Calculate hit region mutation rate
+        mismatch_hit = compute_mismatch_stats_sam(sam_hit, {hit_id: hit_seq})
+        hit_info = mismatch_hit[hit_id]
+        hit_rate = hit_info["avg_mismatch_rate"]
+        mappable_reads = hit_info["mapped_reads"]
+        
+        # Calculate net mutation rate (hit - background)
+        net_mutation_rate = max(hit_rate - bg_rate, 0.0)
+        
+        # Calculate estimated mutations per target copy (basepairs) - same as in main analysis
+        length_of_target = len(hit_seq)
+        est_mut_per_copy = max(net_mutation_rate * length_of_target, 0.0)
+        
+        # Check if it's a protein-coding sequence
+        is_protein = True
+        seq_upper = hit_seq.upper()
+        if len(seq_upper) % 3 != 0:
+            is_protein = False
+        elif "*" in str(Seq(seq_upper).translate(to_stop=False))[:-1]:
+            is_protein = False
+        
+        # Calculate AA mutations per gene using Poisson simulation (same as main analysis)
+        if is_protein:
+            aa_diffs = simulate_aa_distribution(est_mut_per_copy, hit_seq, n_trials=1000)
+            avg_aa_mutations = sum(aa_diffs) / len(aa_diffs)
+        else:
+            avg_aa_mutations = 0.0
+        
+        logging.info(f"Quality {quality_threshold}: aa_mutations_per_gene={avg_aa_mutations:.4f}, "
+                    f"mappable_reads={mappable_reads}, hit_rate={hit_rate:.6f}, bg_rate={bg_rate:.6f}")
+        
+        return avg_aa_mutations, mappable_reads, True
+        
+    except Exception as e:
+        logging.error(f"Error calculating mutation rate for quality {quality_threshold}: {e}")
+        return None, None, False
+
+def run_qc_analysis(fastq_path, results_dir):
+    """
+    Run QC analysis by testing different quality score thresholds and plotting results.
+    
+    Args:
+        fastq_path: Path to input FASTQ.gz file
+        results_dir: Directory to save QC results
+    """
+    logging.info("Starting QC analysis with quality score filtering")
+    
+    # Define quality thresholds to test (15 filters)
+    quality_thresholds = [5, 7, 10, 12, 15, 17, 20, 22, 25, 27, 30, 32, 35, 37, 40]
+    
+    # Paths to reference files
+    ref_hit_fasta = os.path.join(DATA_DIR, "region_of_interest.fasta")
+    plasmid_fasta = os.path.join(DATA_DIR, "plasmid.fasta")
+    
+    # Create temporary work directory for QC analysis
+    with tempfile.TemporaryDirectory() as qc_work_dir:
+        logging.info(f"Using temporary work directory: {qc_work_dir}")
+        
+        # Calculate mutation rates and mappable reads for each quality threshold
+        aa_mutations = []
+        mappable_reads = []
+        successful_thresholds = []
+        
+        for q_threshold in quality_thresholds:
+            logging.info(f"Processing quality threshold: {q_threshold}")
+            aa_mut, reads, success = calculate_mutation_rate_for_quality(
+                fastq_path, q_threshold, qc_work_dir, ref_hit_fasta, plasmid_fasta
+            )
+            
+            if success and aa_mut is not None and reads is not None:
+                aa_mutations.append(aa_mut)
+                mappable_reads.append(reads)
+                successful_thresholds.append(q_threshold)
+                logging.info(f"Quality {q_threshold}: AA mutations per gene = {aa_mut:.4f}, mappable reads = {reads}")
+            else:
+                logging.warning(f"Failed to calculate mutation rate for quality threshold {q_threshold}")
+        
+        # Create QC plot if we have at least 2 data points
+        if len(aa_mutations) >= 2:
+            create_qc_plot(successful_thresholds, aa_mutations, mappable_reads, results_dir)
+        else:
+            logging.warning("Insufficient data points for QC plot (need at least 2)")
+
+def create_qc_plot(quality_thresholds, aa_mutations, mappable_reads, results_dir):
+    """
+    Create a dual-axis plot showing quality score threshold vs AA mutations per gene and mappable reads.
+    
+    Args:
+        quality_thresholds: List of quality score thresholds
+        aa_mutations: List of corresponding AA mutations per gene
+        mappable_reads: List of corresponding mappable reads
+        results_dir: Directory to save the plot
+    """
+    try:
+        # Create the plot with dual y-axes
+        fig, ax1 = plt.subplots(figsize=(12, 8))
+        
+        # Left y-axis: AA mutations per gene
+        color1 = '#2E8B57'
+        ax1.set_xlabel('Quality Score Threshold', fontsize=12, fontweight='bold')
+        ax1.set_ylabel('Estimated AA Mutations per Gene', fontsize=12, fontweight='bold', color=color1)
+        ax1.scatter(quality_thresholds, aa_mutations, 
+                   s=100, alpha=0.7, color=color1, edgecolors='black', linewidth=1, label='AA Mutations per Gene')
+        ax1.tick_params(axis='y', labelcolor=color1)
+        
+        # Right y-axis: Mappable reads
+        ax2 = ax1.twinx()
+        color2 = '#FF6B6B'
+        ax2.set_ylabel('Number of Mappable Reads', fontsize=12, fontweight='bold', color=color2)
+        ax2.scatter(quality_thresholds, mappable_reads, 
+                   s=100, alpha=0.7, color=color2, edgecolors='black', linewidth=1, marker='s', label='Mappable Reads')
+        ax2.tick_params(axis='y', labelcolor=color2)
+        
+        # Customize the plot
+        ax1.set_title('AA Mutations per Gene and Mappable Reads vs Quality Score Filter', fontsize=14, fontweight='bold')
+        
+        # Add grid for better readability
+        ax1.grid(True, alpha=0.3)
+        
+        # Customize ticks and spines
+        ax1.tick_params(axis='both', which='major', labelsize=10, direction='in', length=6)
+        ax1.tick_params(axis='both', which='minor', direction='in', length=3)
+        ax1.spines['top'].set_visible(False)
+        ax1.spines['right'].set_visible(False)
+        
+        # Add data point labels for AA mutations
+        for i, (q, aa_mut) in enumerate(zip(quality_thresholds, aa_mutations)):
+            ax1.annotate(f'Q{q}', (q, aa_mut), xytext=(5, 5), 
+                        textcoords='offset points', fontsize=9, alpha=0.8, color=color1)
+        
+        # Add data point labels for mappable reads
+        for i, (q, reads) in enumerate(zip(quality_thresholds, mappable_reads)):
+            ax2.annotate(f'{reads}', (q, reads), xytext=(5, -15), 
+                        textcoords='offset points', fontsize=8, alpha=0.8, color=color2)
+        
+        # Add legend
+        lines1, labels1 = ax1.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper right', frameon=False, fontsize=10)
+        
+        # Save the plot
+        qc_plot_path = os.path.join(results_dir, "qc_mutation_rate_vs_quality.png")
+        fig.savefig(qc_plot_path, dpi=300, bbox_inches='tight')
+        plt.close(fig)
+        
+        logging.info(f"QC plot saved to: {qc_plot_path}")
+        
+        # Also save data as CSV for reference
+        qc_data_path = os.path.join(results_dir, "qc_mutation_rate_vs_quality.csv")
+        with open(qc_data_path, 'w') as f:
+            f.write("quality_threshold,aa_mutations_per_gene,mappable_reads\n")
+            for q, aa_mut, reads in zip(quality_thresholds, aa_mutations, mappable_reads):
+                f.write(f"{q},{aa_mut:.6f},{reads}\n")
+        
+        logging.info(f"QC data saved to: {qc_data_path}")
+        
+    except Exception as e:
+        logging.error(f"Error creating QC plot: {e}")
 
 def simulate_aa_distribution(lambda_bp, cds_seq, n_trials=1000):
     """
@@ -871,6 +1107,8 @@ def process_single_fastq(fastq_path, master_summary_path):
         txtf.write(f"   • {panel_path_png} (figure)\n")
         txtf.write(f"   • {panel_path_pdf} (figure)\n")
         txtf.write(f"   • {pdf_path} (mutation spectrum table)\n")
+        txtf.write(f"   • qc_mutation_rate_vs_quality.png (QC plot)\n")
+        txtf.write(f"   • qc_mutation_rate_vs_quality.csv (QC data)\n")
 
     logging.info(f"Wrote per-sample summary to: {sample_summary_path}")
 
@@ -888,6 +1126,17 @@ def process_single_fastq(fastq_path, master_summary_path):
             f"{est_mut_per_copy:.6e}\t"
             f"{is_protein}\n"
         )
+
+    # ----------------------------
+    # RUN QC ANALYSIS WITH QUALITY SCORE FILTERING
+    # ----------------------------
+    logging.info("Running QC analysis with quality score filtering...")
+    try:
+        run_qc_analysis(fastq_path, results_dir)
+        logging.info("QC analysis completed successfully")
+    except Exception as e:
+        logging.error(f"QC analysis failed: {e}")
+        # Don't fail the entire analysis if QC fails
 
     # ----------------------------
     # CLEAN UP: remove this sample's work_dir entirely
