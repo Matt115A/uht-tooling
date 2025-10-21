@@ -527,7 +527,7 @@ def run_qc_analysis(fastq_path, results_dir):
             with open(optimal_qscore_path, 'w') as f:
                 f.write("=== OPTIMAL Q-SCORE ANALYSIS (PRECISION-WEIGHTED) ===\n")
                 f.write(f"Optimal Q-score threshold: {optimal_qscore}\n")
-                f.write(f"Precision-weighted score: {(1.0 / optimal_result['std_aa_mutations']) * optimal_qscore:.6f}\n")
+                f.write(f"Precision-weighted score: {(1.0 / optimal_result['std_aa_mutations']) * optimal_qscore:.6f}\n" if optimal_result['std_aa_mutations'] > 0 else "Precision-weighted score: inf (perfect precision)\n")
                 f.write(f"Empirical error (std): {optimal_result['std_aa_mutations']:.6f}\n")
                 f.write(f"AA mutations per gene: {optimal_result['mean_aa_mutations']:.4f} ± {optimal_result['std_aa_mutations']:.4f}\n")
                 f.write(f"95% Confidence Interval: [{optimal_result['ci_lower']:.4f}, {optimal_result['ci_upper']:.4f}]\n")
@@ -548,8 +548,8 @@ def run_qc_analysis(fastq_path, results_dir):
             shutil.rmtree(segment_dir)
             logging.info(f"Cleaned up segment directory: {segment_dir}")
         
-        # Return the optimal Q-score for use in main analysis
-        return optimal_qscore
+        # Return both QC results and optimal Q-score for use in main analysis
+        return qc_results, optimal_qscore
 
 def find_optimal_qscore_simple(qc_results):
     """
@@ -1747,6 +1747,514 @@ def simulate_aa_distribution(lambda_bp, cds_seq, n_trials=1000):
 
     return aa_diffs
 
+def run_main_analysis_for_qscore(fastq_path, qscore, qscore_desc, sample_name, work_dir, results_dir, 
+                                 chunks, ref_hit_fasta, plasmid_fasta, hit_seq, hit_id, plasmid_seq, idx):
+    """
+    Run the main mutation rate analysis for a specific Q-score.
+    
+    Args:
+        fastq_path: Path to the FASTQ file to analyze
+        qscore: Q-score threshold (None for unfiltered)
+        qscore_desc: Description of the Q-score (e.g., "Q18", "unfiltered")
+        sample_name: Name of the sample
+        work_dir: Working directory for temporary files
+        results_dir: Results directory for output files
+        chunks: List of plasmid chunks
+        ref_hit_fasta: Path to reference hit FASTA
+        plasmid_fasta: Path to plasmid FASTA
+        hit_seq: Hit sequence
+        hit_id: Hit ID
+        plasmid_seq: Plasmid sequence
+        idx: Index of hit in plasmid
+    
+    Returns:
+        dict: Analysis results
+    """
+    logging.info(f"Running main analysis for {qscore_desc}...")
+    
+    # Ensure work directory exists
+    os.makedirs(work_dir, exist_ok=True)
+    
+    # Create subdirectory for this Q-score analysis
+    qscore_results_dir = results_dir
+    if qscore is not None:
+        qscore_results_dir = os.path.join(results_dir, f"q{qscore}_analysis")
+        os.makedirs(qscore_results_dir, exist_ok=True)
+    
+    # Write chunks FASTA & align to background‐chunks
+    chunks_fasta = create_multi_fasta(chunks, work_dir)
+    sam_chunks   = run_minimap2(fastq_path, chunks_fasta, "plasmid_chunks_alignment", work_dir)
+
+    # Align to hit (target) alone
+    sam_hit = run_minimap2(fastq_path, ref_hit_fasta, "hit_alignment", work_dir)
+
+    # Compute mismatch stats for background chunks (for reference, but not used for background rate)
+    chunk_refs      = { f"chunk_{i+1}": seq for i, seq in enumerate(chunks) }
+    mismatch_chunks = compute_mismatch_stats_sam(sam_chunks, chunk_refs)
+
+    # ----------------------------
+    # COMPUTE BASE DISTRIBUTION AT EACH POSITION OF HIT
+    # ----------------------------
+    base_counts = [
+        {"A": 0, "C": 0, "G": 0, "T": 0, "N": 0}
+        for _ in range(len(hit_seq))
+    ]
+    samfile_hit = pysam.AlignmentFile(sam_hit, "r")
+    for read in samfile_hit.fetch():
+        if read.is_unmapped or read.query_sequence is None:
+            continue
+        for read_pos, ref_pos in read.get_aligned_pairs(matches_only=False):
+            if read_pos is not None and ref_pos is not None and 0 <= ref_pos < len(hit_seq):
+                base = read.query_sequence[read_pos].upper()
+                if base not in {"A", "C", "G", "T"}:
+                    base = "N"
+                base_counts[ref_pos][base] += 1
+    samfile_hit.close()
+
+    # ----------------------------
+    # ALIGN TO FULL PLASMID TO GET COVERAGE
+    # ----------------------------
+    sam_plasmid = run_minimap2(fastq_path, plasmid_fasta, "plasmid_full_alignment", work_dir)
+
+    # Calculate plasmid coverage
+    plasmid_cov = [0] * len(plasmid_seq)
+    samfile_full = pysam.AlignmentFile(sam_plasmid, "r")
+    for read in samfile_full.fetch():
+        if read.is_unmapped or read.query_sequence is None:
+            continue
+        for read_pos, ref_pos in read.get_aligned_pairs(matches_only=False):
+            if ref_pos is not None and 0 <= ref_pos < len(plasmid_seq):
+                plasmid_cov[ref_pos] += 1
+    samfile_full.close()
+
+    # Calculate background rate from full plasmid alignment, excluding target region
+    # This avoids artificial junction mismatches from concatenated chunks
+    bg_mis, bg_cov, bg_reads = calculate_background_from_plasmid(sam_plasmid, plasmid_seq, idx, len(hit_seq))
+    bg_rate  = (bg_mis / bg_cov) if bg_cov else 0.0       # raw per‐base
+    bg_rate_per_kb = bg_rate * 1e3
+
+    logging.info(
+        f"Background (plasmid excluding target): total_mismatches={bg_mis}, "
+        f"covered_bases={bg_cov}, mapped_reads={bg_reads}, "
+        f"rate_per_kb={bg_rate_per_kb:.4f}"
+    )
+
+    # Compute mismatch stats for hit (target)
+    mismatch_hit = compute_mismatch_stats_sam(sam_hit, {hit_id: hit_seq})
+    hit_info     = mismatch_hit[hit_id]
+    hit_mis      = hit_info["total_mismatches"]
+    hit_cov      = hit_info["total_covered_bases"]
+    hit_reads    = hit_info["mapped_reads"]
+    hit_rate     = hit_info["avg_mismatch_rate"]     # raw per‐base
+    hit_rate_per_kb  = hit_rate * 1e3
+
+    logging.info(
+        f"Target ({hit_id}): total_mismatches={hit_mis}, "
+        f"covered_bases={hit_cov}, mapped_reads={hit_reads}, "
+        f"rate_per_kb={hit_rate_per_kb:.4f}"
+    )
+
+    # Two‐proportion Z‐test: is target rate > background rate?
+    z_stat, p_val = z_test_two_proportions(hit_mis, hit_cov, bg_mis, bg_cov)
+
+    # Compute "Estimated mutations per target copy (basepairs)" (float)
+    length_of_target = len(hit_seq)
+    true_diff_rate   = hit_rate - bg_rate
+    est_mut_per_copy = max(true_diff_rate * length_of_target, 0.0)
+
+    # Determine if ROI is a valid protein‐coding sequence (updated definition)
+    is_protein = True
+    reasons    = []
+    seq_upper  = hit_seq.upper()
+    # Must be multiple of 3
+    if len(seq_upper) % 3 != 0:
+        is_protein = False
+        reasons.append(f"length {len(seq_upper)} is not a multiple of 3")
+
+    if is_protein:
+        prot_full = str(Seq(seq_upper).translate(to_stop=False))
+        # Check for premature stop codons (anything except possibly at the end)
+        if "*" in prot_full[:-1]:
+            is_protein = False
+            reasons.append("premature stop codon detected before the last codon")
+        # No requirement to start with ATG or end with stop beyond the last codon
+
+    # If protein, simulate AA distribution per copy using Poisson sampling
+    if is_protein:
+        logging.info(f"Simulating amino acid distribution with λ_bp={est_mut_per_copy:.2f}")
+        aa_diffs = simulate_aa_distribution(est_mut_per_copy, hit_seq, n_trials=1000)
+        avg_aa_mutations = sum(aa_diffs) / len(aa_diffs)
+        
+        # Log simulation results for debugging
+        logging.info(f"AA simulation results: min={min(aa_diffs)}, max={max(aa_diffs)}, mean={avg_aa_mutations:.3f}")
+        logging.info(f"AA simulation distribution: {len([x for x in aa_diffs if x == 0])} zeros, {len([x for x in aa_diffs if x > 0])} non-zeros")
+    else:
+        aa_diffs = []
+        avg_aa_mutations = None
+
+    # Update Q-score info for titles
+    qscore_info = f" ({qscore_desc})" if qscore_desc != "unfiltered" else ""
+    
+    # ----------------------------
+    # SAVE CSV FOR MUTATION RATES (PANEL 1)
+    # ----------------------------
+    gene_mismatch_csv = os.path.join(qscore_results_dir, "gene_mismatch_rates.csv")
+    with open(gene_mismatch_csv, "w", newline="") as csvfile:
+        csvfile.write(f"# gene_id: {hit_id}\n")
+        csvfile.write(f"# background_rate_per_kb: {bg_rate_per_kb:.6f}\n")
+        csvfile.write("position_1based,mismatch_rate_per_base\n")
+        for pos0, rate in enumerate(hit_info["pos_rates"]):
+            csvfile.write(f"{pos0 + 1},{rate:.6e}\n")
+    logging.info(f"Saved CSV for gene mismatch rates: {gene_mismatch_csv}")
+
+    # ----------------------------
+    # SAVE CSV FOR BASE DISTRIBUTION (PANEL 2)
+    # ----------------------------
+    base_dist_csv = os.path.join(qscore_results_dir, "base_distribution.csv")
+    with open(base_dist_csv, "w", newline="") as csvfile:
+        csvfile.write(f"# gene_id: {hit_id}\n")
+        csvfile.write("position_1based,ref_base,A_count,C_count,G_count,T_count,N_count\n")
+        for pos0, counts in enumerate(base_counts):
+            ref_base = seq_upper[pos0]
+            csvfile.write(f"{pos0 + 1},{ref_base},{counts['A']},{counts['C']},{counts['G']},{counts['T']},{counts['N']}\n")
+    logging.info(f"Saved CSV for base distribution: {base_dist_csv}")
+
+    # ----------------------------
+    # SAVE CSV FOR AA SUBSTITUTIONS (PANEL 3) - only if protein
+    # ----------------------------
+    if is_protein:
+        aa_subst_csv = os.path.join(qscore_results_dir, "aa_substitutions.csv")
+        with open(aa_subst_csv, "w", newline="") as csvfile:
+            csvfile.write(f"# gene_id: {hit_id}\n")
+            csvfile.write(f"# lambda_bp_mut: {est_mut_per_copy:.6f}\n")
+            csvfile.write("position_1based,ref_aa,alt_aa,count\n")
+            # This would need to be implemented based on the specific requirements
+            # For now, just write a header
+        logging.info(f"Saved CSV for AA substitutions: {aa_subst_csv}")
+
+    # ----------------------------
+    # SAVE CSV FOR PLASMID COVERAGE (PANEL 4)
+    # ----------------------------
+    plasmid_cov_csv = os.path.join(qscore_results_dir, "plasmid_coverage.csv")
+    with open(plasmid_cov_csv, "w", newline="") as csvfile:
+        csvfile.write("position_1based,coverage\n")
+        for pos0, cov in enumerate(plasmid_cov):
+            csvfile.write(f"{pos0 + 1},{cov}\n")
+    logging.info(f"Saved CSV for plasmid coverage: {plasmid_cov_csv}")
+
+    # ----------------------------
+    # SAVE CSV FOR AA MUTATION DISTRIBUTION (PANEL 3)
+    # ----------------------------
+    aa_dist_csv = os.path.join(qscore_results_dir, "aa_mutation_distribution.csv")
+    with open(aa_dist_csv, "w", newline="") as csvfile:
+        csvfile.write(f"# gene_id: {hit_id}\n")
+        csvfile.write(f"# lambda_bp_mut: {est_mut_per_copy:.6f}\n")
+        csvfile.write(f"# n_trials: 1000\n")
+        if is_protein:
+            csvfile.write("trial_index,aa_mutations\n")
+            for idx_trial, aa_count in enumerate(aa_diffs, start=1):
+                csvfile.write(f"{idx_trial},{aa_count}\n")
+        else:
+            csvfile.write("# No AA distribution because region is not protein-coding\n")
+    logging.info(f"Saved CSV for AA mutation distribution: {aa_dist_csv}")
+
+    # ----------------------------
+    # PREPARE PANEL FIGURE WITH 4 SUBPLOTS
+    # ----------------------------
+    fig, axes = plt.subplots(2, 2, figsize=(18, 12), constrained_layout=True)
+    # axes[0,0]: Mutation rate over gene of interest
+    # axes[0,1]: Rolling mutation rate across plasmid (20 bp window)
+    # axes[1,0]: Coverage of plasmid with ROI shaded
+    # axes[1,1]: KDE of AA mutations per copy
+
+    # --- Panel 1: Mutation rate over gene of interest ---
+    ax0 = axes[0, 0]
+    positions_gene = np.arange(1, len(hit_info["pos_rates"]) + 1)
+    ax0.axhspan(0, bg_rate, color='gray', alpha=0.3, label="Background rate")
+    ax0.plot(positions_gene, hit_info["pos_rates"],
+             color="#2E86AB", linestyle='-', linewidth=1.5, alpha=0.8,
+             label="Mutation rate")
+    ax0.set_title(f"Mismatch Rate per Position: Gene of Interest{qscore_info}", fontsize=14, fontweight='bold')
+    ax0.set_xlabel("Position in Gene (bp)", fontsize=12)
+    ax0.set_ylabel("Mismatch Rate", fontsize=12)
+    ax0.tick_params(axis='both', which='major', labelsize=10, direction='in', length=6)
+    ax0.tick_params(axis='both', which='minor', direction='in', length=3)
+    ax0.spines['top'].set_visible(False)
+    ax0.spines['right'].set_visible(False)
+    ax0.legend(loc="upper right", frameon=False, fontsize=10)
+
+    # --- Panel 2: Rolling mutation rate across plasmid ---
+    ax1 = axes[0, 1]
+    # Calculate rolling mutation rate across plasmid
+    window_size = 20
+    rolling_positions = []
+    rolling_rates = []
+    
+    # Calculate mismatches per position across the plasmid
+    plasmid_mismatches = [0] * len(plasmid_seq)
+    samfile_rolling = pysam.AlignmentFile(sam_plasmid, "r")
+    for read in samfile_rolling.fetch():
+        if read.is_unmapped or read.query_sequence is None:
+            continue
+        for read_pos, ref_pos in read.get_aligned_pairs(matches_only=False):
+            if ref_pos is not None and 0 <= ref_pos < len(plasmid_seq):
+                if read_pos is not None:
+                    read_base = read.query_sequence[read_pos].upper()
+                    ref_base = plasmid_seq[ref_pos].upper()
+                    if read_base != ref_base and read_base in "ACGT" and ref_base in "ACGT":
+                        plasmid_mismatches[ref_pos] += 1
+    samfile_rolling.close()
+    
+    # Calculate rolling mutation rate
+    for i in range(len(plasmid_cov) - window_size + 1):
+        window_cov = plasmid_cov[i:i + window_size]
+        window_mismatches = plasmid_mismatches[i:i + window_size]
+        
+        total_coverage = sum(window_cov)
+        total_mismatches = sum(window_mismatches)
+        
+        if total_coverage > 0:  # Only include windows with coverage
+            rolling_positions.append(i + window_size // 2)
+            mutation_rate = total_mismatches / total_coverage
+            rolling_rates.append(mutation_rate)
+    
+    ax1.plot(rolling_positions, rolling_rates,
+             color="#FF6B6B", linestyle='-', linewidth=2, alpha=0.8,
+             label="Rolling average (20 bp)")
+    ax1.set_title(f"Rolling Mutation Rate Across Plasmid (20 bp Window){qscore_info}", fontsize=14, fontweight='bold')
+    ax1.set_xlabel("Position on Plasmid (bp)", fontsize=12)
+    ax1.set_ylabel("Mismatch Rate", fontsize=12)
+    ax1.tick_params(axis='both', which='major', labelsize=10, direction='in', length=6)
+    ax1.tick_params(axis='both', which='minor', direction='in', length=3)
+    ax1.spines['top'].set_visible(False)
+    ax1.spines['right'].set_visible(False)
+    ax1.legend(loc="upper right", frameon=False, fontsize=10)
+    # Shade the ROI region
+    start_roi = idx + 1
+    end_roi = idx + len(hit_seq)
+    ax1.axvspan(start_roi, end_roi, color='gray', alpha=0.3, label=f"ROI: {start_roi}–{end_roi}")
+
+    # --- Panel 3: Coverage of plasmid with ROI shaded ---
+    ax2 = axes[1, 0]
+    plasmid_positions = np.arange(1, len(plasmid_cov) + 1)
+    ax2.plot(plasmid_positions, plasmid_cov,
+             linestyle='-', color='black', linewidth=1.0, alpha=0.8, label="Coverage")
+    ax2.set_title(f"Full Plasmid Coverage with ROI Shaded{qscore_info}", fontsize=14, fontweight='bold')
+    ax2.set_xlabel("Position on Plasmid", fontsize=12)
+    ax2.set_ylabel("Coverage (# reads)", fontsize=12)
+    ax2.tick_params(axis='both', which='major', labelsize=10, direction='in', length=6)
+    ax2.tick_params(axis='both', which='minor', direction='in', length=3)
+    ax2.spines['top'].set_visible(False)
+    ax2.spines['right'].set_visible(False)
+    start_roi = idx + 1
+    end_roi   = idx + len(hit_seq)
+    ax2.axvspan(start_roi, end_roi, color='gray', alpha=0.3, label=f"ROI: {start_roi}–{end_roi}")
+
+    # --- Panel 4: KDE of AA mutations per copy ---
+    ax3 = axes[1, 1]
+    if is_protein and aa_diffs and len(aa_diffs) > 0:
+        x_vals = np.array(aa_diffs)
+        unique_vals = np.unique(x_vals)
+        
+        if len(unique_vals) > 1:
+            # Multiple unique values - use KDE or histogram
+            if HAVE_SCIPY:
+                try:
+                    kde = gaussian_kde(x_vals)
+                    x_grid = np.linspace(0, max(x_vals), 200)
+                    kde_values = kde(x_grid)
+                    ax3.plot(x_grid, kde_values,
+                             color="#C44E52", linewidth=2.0, alpha=0.8, label="KDE")
+                    ax3.fill_between(x_grid, kde_values, color="#C44E52", alpha=0.3)
+                    ax3.set_ylim(bottom=0)
+                except Exception as e:
+                    logging.warning(f"KDE failed: {e}, falling back to histogram")
+                    ax3.hist(x_vals, bins=min(20, len(unique_vals)), 
+                            color="#C44E52", alpha=0.7, density=True, edgecolor='black')
+            else:
+                ax3.hist(x_vals, bins=min(20, len(unique_vals)), 
+                        color="#C44E52", alpha=0.7, density=True, edgecolor='black')
+        else:
+            # Single unique value - just show a bar
+            ax3.bar(unique_vals, [1.0], color="#C44E52", alpha=0.7, width=0.1)
+            ax3.set_xlim(unique_vals[0] - 0.5, unique_vals[0] + 0.5)
+    else:
+        # Not protein or no AA differences
+        ax3.text(0.5, 0.5, "Not a protein‐coding region", 
+                 horizontalalignment='center', verticalalignment='center', 
+                 fontsize=12, color='gray', transform=ax3.transAxes)
+        
+        ax3.set_title("AA Mutation Distribution", fontsize=14, fontweight='bold')
+        ax3.set_xlabel("Number of AA Mutations", fontsize=12)
+        ax3.set_ylabel("Density", fontsize=12)
+        ax3.spines['top'].set_visible(False)
+        ax3.spines['right'].set_visible(False)
+        ax3.set_xticks([])
+        ax3.set_yticks([])
+
+    # Save the combined figure as both PNG and PDF
+    panel_path_png = os.path.join(qscore_results_dir, "summary_panels.png")
+    panel_path_pdf = os.path.join(qscore_results_dir, "summary_panels.pdf")
+    fig.savefig(panel_path_png, dpi=150, transparent=False)
+    fig.savefig(panel_path_pdf)  # vector format
+    plt.close(fig)
+    logging.info(f"Saved combined panel figure as PNG: {panel_path_png}")
+    logging.info(f"Saved combined panel figure as PDF: {panel_path_pdf}")
+
+    # ----------------------------
+    # COMPUTE MUTATION SPECTRUM FOR ABOVE-BACKGROUND POSITIONS
+    # ----------------------------
+    # Define categories and reference percentages
+    categories = {
+        "A→G, T→C":    {"pairs": [("A", "G"), ("T", "C")], "ref": 17.5},
+        "G→A, C→T":    {"pairs": [("G", "A"), ("C", "T")], "ref": 25.5},
+        "A→T, T→A":    {"pairs": [("A", "T"), ("T", "A")], "ref": 28.5},
+        "A→C, T→G":    {"pairs": [("A", "C"), ("T", "G")], "ref": 4.7},
+        "G→C, C→G":    {"pairs": [("G", "C"), ("C", "G")], "ref": 4.1},
+        "G→T, C→A":    {"pairs": [("G", "T"), ("C", "A")], "ref": 14.1},
+    }
+
+    # Tally observed counts at above-background positions
+    category_counts = {cat: 0 for cat in categories}
+    total_alt_counts = 0
+
+    for pos0, rate in enumerate(hit_info["pos_rates"]):
+        if rate <= bg_rate:
+            continue
+        ref_base = seq_upper[pos0]
+        counts   = base_counts[pos0]
+        for alt_base in ("A", "C", "G", "T"):
+            if alt_base == ref_base:
+                continue
+            cnt = counts.get(alt_base, 0)
+            if cnt == 0:
+                continue
+            # Determine which category this (ref→alt) belongs to
+            for cat, info in categories.items():
+                if (ref_base, alt_base) in info["pairs"]:
+                    category_counts[cat] += cnt
+                    total_alt_counts += cnt
+                    break
+
+    # Compute sample percentages
+    sample_percent = {}
+    if total_alt_counts > 0:
+        for cat, cnt in category_counts.items():
+            sample_percent[cat] = 100.0 * cnt / total_alt_counts
+    else:
+        for cat in categories:
+            sample_percent[cat] = 0.0
+
+    # ----------------------------
+    # GENERATE PDF TABLE (MUTATION SPECTRUM)
+    # ----------------------------
+    pdf_path = os.path.join(qscore_results_dir, f"{sample_name}_mutation_spectrum.pdf")
+    # Prepare table data
+    table_rows = []
+    for cat in categories:
+        ref_pct = categories[cat]["ref"]
+        samp_pct = sample_percent[cat]
+        table_rows.append([cat, f"{ref_pct:.1f}%", f"{samp_pct:.1f}%"])
+
+    # Create a matplotlib figure for the table
+    fig, ax = plt.subplots(figsize=(6, 3))  # adjust size as needed
+    ax.axis("off")
+
+    col_labels = ["Mutation Type", "Mutazyme II reference", sample_name]
+    tbl = ax.table(
+        cellText=table_rows,
+        colLabels=col_labels,
+        cellLoc="center",
+        colLoc="center",
+        loc="center"
+    )
+    tbl.auto_set_font_size(False)
+    tbl.set_fontsize(10)
+    tbl.scale(1, 1.5)  # stretch rows
+
+    # Add a title
+    ax.set_title("Mutation Spectrum (Above-Background Sites)", fontsize=12, fontweight="bold", pad=20)
+
+    # Save as PDF
+    fig.savefig(pdf_path, format="pdf", bbox_inches="tight")
+    plt.close(fig)
+    logging.info(f"Saved mutation spectrum table as PDF: {pdf_path}")
+
+    # ----------------------------
+    # WRITE PER-SAMPLE SUMMARY TXT
+    # ----------------------------
+    sample_summary_path = os.path.join(qscore_results_dir, "summary.txt")
+    with open(sample_summary_path, "w") as txtf:
+        txtf.write(f"Sample: {sample_name}\n")
+        txtf.write(f"{'=' * (8 + len(sample_name))}\n\n")
+        txtf.write("1) Background (plasmid excluding target):\n")
+        txtf.write(f"   • Total mismatches:    {bg_mis}\n")
+        txtf.write(f"   • Total covered bases: {bg_cov}\n")
+        txtf.write(f"   • Mapped reads:        {bg_reads}\n")
+        txtf.write(f"   • Rate (per base):     {bg_rate:.6e}\n")
+        txtf.write(f"   • Rate (per kb):       {bg_rate_per_kb:.6e}\n\n")
+
+        txtf.write("2) Target (ROI) stats:\n")
+        txtf.write(f"   • Gene ID:            {hit_id}\n")
+        txtf.write(f"   • Total mismatches:   {hit_mis}\n")
+        txtf.write(f"   • Total covered bases:{hit_cov}\n")
+        txtf.write(f"   • Mapped reads:       {hit_reads}\n")
+        txtf.write(f"   • Rate (per base):    {hit_rate:.6e}\n")
+        txtf.write(f"   • Rate (per kb):      {hit_rate_per_kb:.6e}\n")
+        txtf.write(f"   • Z‐statistic:        {z_stat:.4f}\n")
+        txtf.write(f"   • p‐value:            {p_val if p_val is not None else 'N/A'}\n")
+        txtf.write(f"   • Estimated mutations per copy: {est_mut_per_copy:.6e}\n\n")
+
+        txtf.write("3) Protein‐coding evaluation:\n")
+        txtf.write(f"   • Is protein: {is_protein}\n")
+        if is_protein:
+            txtf.write(f"   • Average AA mutations per copy (simulated): {avg_aa_mutations:.3f}\n")
+        else:
+            txtf.write(f"   • Reason(s): {('; '.join(reasons) if reasons else 'N/A')}\n")
+        txtf.write("\n4) Mutation spectrum (above-background sites):\n")
+        for cat in categories:
+            txtf.write(f"   • {cat}: {sample_percent[cat]:.1f}%  (Ref: {categories[cat]['ref']:.1f}%)\n")
+        txtf.write("\n5) Output files written to:\n")
+        txtf.write(f"   • {gene_mismatch_csv}\n")
+        txtf.write(f"   • {base_dist_csv}\n")
+        if is_protein:
+            txtf.write(f"   • {aa_subst_csv}\n")
+        txtf.write(f"   • {plasmid_cov_csv}\n")
+        txtf.write(f"   • {aa_dist_csv}\n")
+        txtf.write(f"   • {panel_path_png} (figure)\n")
+        txtf.write(f"   • {panel_path_pdf} (figure)\n")
+        txtf.write(f"   • {pdf_path} (mutation spectrum table)\n")
+
+    logging.info(f"Wrote per-sample summary to: {sample_summary_path}")
+    
+    return {
+        'qscore': qscore,
+        'qscore_desc': qscore_desc,
+        'qscore_results_dir': qscore_results_dir,
+        'bg_mis': bg_mis,
+        'bg_cov': bg_cov,
+        'bg_reads': bg_reads,
+        'bg_rate': bg_rate,
+        'bg_rate_per_kb': bg_rate_per_kb,
+        'hit_mis': hit_mis,
+        'hit_cov': hit_cov,
+        'hit_reads': hit_reads,
+        'hit_rate': hit_rate,
+        'hit_rate_per_kb': hit_rate_per_kb,
+        'hit_info': hit_info,
+        'z_stat': z_stat,
+        'p_val': p_val,
+        'est_mut_per_copy': est_mut_per_copy,
+        'is_protein': is_protein,
+        'reasons': reasons,
+        'aa_diffs': aa_diffs,
+        'avg_aa_mutations': avg_aa_mutations,
+        'base_counts': base_counts,
+        'qscore_info': qscore_info,
+        'sam_plasmid': sam_plasmid
+    }
+
+
 def process_single_fastq(fastq_path, master_summary_path):
     """
     Run the entire mutation‐rate analysis pipeline on a single FASTQ file.
@@ -1819,528 +2327,53 @@ def process_single_fastq(fastq_path, master_summary_path):
     logging.info(f"Chunk sizes: {chunk_sizes} bp")
 
     # ----------------------------
-    # RUN QC ANALYSIS FIRST TO DETERMINE OPTIMAL Q-SCORE
+    # RUN QC ANALYSIS TO GET Q-SCORE RESULTS
     # ----------------------------
-    logging.info("Running QC analysis to determine optimal Q-score...")
+    logging.info("Running QC analysis to get Q-score results...")
+    qc_results = None
     optimal_qscore = None
     try:
-        optimal_qscore = run_qc_analysis(fastq_path, results_dir)
-        if optimal_qscore is not None:
-            logging.info(f"QC analysis completed successfully. Optimal Q-score: {optimal_qscore}")
+        qc_results, optimal_qscore = run_qc_analysis(fastq_path, results_dir)
+        if qc_results is not None:
+            logging.info(f"QC analysis completed successfully. Found {len(qc_results)} Q-score results.")
+            if optimal_qscore is not None:
+                logging.info(f"Optimal Q-score determined: {optimal_qscore}")
         else:
-            logging.warning("QC analysis completed but no optimal Q-score determined. Using unfiltered data.")
+            logging.warning("QC analysis completed but no Q-score results found.")
     except Exception as e:
         logging.error(f"QC analysis failed: {e}")
-        logging.warning("Using unfiltered data for main analysis.")
+        logging.warning("Proceeding with unfiltered data only.")
         # Don't fail the entire analysis if QC fails
 
-    # Apply optimal Q-score filtering if available
-    filtered_fastq_path = fastq_path
-    if optimal_qscore is not None:
-        logging.info(f"Applying Q{optimal_qscore} filtering to main analysis...")
-        filtered_fastq_path = os.path.join(work_dir, f"{sample_name}_q{optimal_qscore}.fastq.gz")
-        if not run_nanofilt_filtering(fastq_path, optimal_qscore, filtered_fastq_path):
-            logging.warning(f"Failed to apply Q{optimal_qscore} filtering. Using unfiltered data.")
-            filtered_fastq_path = fastq_path
-        else:
-            logging.info(f"Successfully applied Q{optimal_qscore} filtering. Using filtered data for main analysis.")
-
-    # Write chunks FASTA & align to background‐chunks
-    chunks_fasta = create_multi_fasta(chunks, work_dir)
-    sam_chunks   = run_minimap2(filtered_fastq_path, chunks_fasta, "plasmid_chunks_alignment", work_dir)
-
-    # Align to hit (target) alone
-    sam_hit = run_minimap2(filtered_fastq_path, ref_hit_fasta, "hit_alignment", work_dir)
-
-    # Compute mismatch stats for background chunks (for reference, but not used for background rate)
-    chunk_refs      = { f"chunk_{i+1}": seq for i, seq in enumerate(chunks) }
-    mismatch_chunks = compute_mismatch_stats_sam(sam_chunks, chunk_refs)
-
     # ----------------------------
-    # COMPUTE BASE DISTRIBUTION AT EACH POSITION OF HIT
+    # RUN MAIN ANALYSIS FOR EACH Q-SCORE (INCLUDING UNFILTERED)
     # ----------------------------
-    base_counts = [
-        {"A": 0, "C": 0, "G": 0, "T": 0, "N": 0}
-        for _ in range(len(hit_seq))
-    ]
-    samfile_hit = pysam.AlignmentFile(sam_hit, "r")
-    for read in samfile_hit.fetch():
-        if read.is_unmapped or read.query_sequence is None:
-            continue
-        for read_pos, ref_pos in read.get_aligned_pairs(matches_only=False):
-            if read_pos is not None and ref_pos is not None and 0 <= ref_pos < len(hit_seq):
-                base = read.query_sequence[read_pos].upper()
-                if base not in {"A", "C", "G", "T"}:
-                    base = "N"
-                base_counts[ref_pos][base] += 1
-    samfile_hit.close()
-
-    # ----------------------------
-    # ALIGN TO FULL PLASMID TO GET COVERAGE
-    # ----------------------------
-    sam_plasmid = run_minimap2(filtered_fastq_path, plasmid_fasta, "plasmid_full_alignment", work_dir)
-
-    # Calculate background rate from full plasmid alignment, excluding target region
-    # This avoids artificial junction mismatches from concatenated chunks
-    bg_mis, bg_cov, bg_reads = calculate_background_from_plasmid(sam_plasmid, plasmid_seq, idx, len(hit_seq))
-    bg_rate  = (bg_mis / bg_cov) if bg_cov else 0.0       # raw per‐base
-    bg_rate_per_kb = bg_rate * 1e3
-
-    logging.info(
-        f"Background (plasmid excluding target): total_mismatches={bg_mis}, "
-        f"covered_bases={bg_cov}, mapped_reads={bg_reads}, "
-        f"rate_per_kb={bg_rate_per_kb:.4f}"
-    )
-
-    # Compute mismatch stats for hit (target)
-    mismatch_hit = compute_mismatch_stats_sam(sam_hit, {hit_id: hit_seq})
-    hit_info     = mismatch_hit[hit_id]
-    hit_mis      = hit_info["total_mismatches"]
-    hit_cov      = hit_info["total_covered_bases"]
-    hit_reads    = hit_info["mapped_reads"]
-    hit_rate     = hit_info["avg_mismatch_rate"]     # raw per‐base
-    hit_rate_per_kb  = hit_rate * 1e3
-
-    logging.info(
-        f"Target ({hit_id}): total_mismatches={hit_mis}, "
-        f"covered_bases={hit_cov}, mapped_reads={hit_reads}, "
-        f"rate_per_kb={hit_rate_per_kb:.4f}"
-    )
-
-    # Two‐proportion Z‐test: is target rate > background rate?
-    z_stat, p_val = z_test_two_proportions(hit_mis, hit_cov, bg_mis, bg_cov)
-
-    # Compute "Estimated mutations per target copy (basepairs)" (float)
-    length_of_target = len(hit_seq)
-    true_diff_rate   = hit_rate - bg_rate
-    est_mut_per_copy = max(true_diff_rate * length_of_target, 0.0)
-
-    # Determine if ROI is a valid protein‐coding sequence (updated definition)
-    is_protein = True
-    reasons    = []
-    seq_upper  = hit_seq.upper()
-    # Must be multiple of 3
-    if len(seq_upper) % 3 != 0:
-        is_protein = False
-        reasons.append(f"length {len(seq_upper)} is not a multiple of 3")
-
-    if is_protein:
-        prot_full = str(Seq(seq_upper).translate(to_stop=False))
-        # Check for premature stop codons (anything except possibly at the end)
-        if "*" in prot_full[:-1]:
-            is_protein = False
-            reasons.append("premature stop codon detected before the last codon")
-        # No requirement to start with ATG or end with stop beyond the last codon
-
-    # If protein, simulate AA distribution per copy using Poisson sampling
-    if is_protein:
-        logging.info(f"Simulating amino acid distribution with λ_bp={est_mut_per_copy:.2f}")
-        aa_diffs = simulate_aa_distribution(est_mut_per_copy, hit_seq, n_trials=1000)
-        avg_aa_mutations = sum(aa_diffs) / len(aa_diffs)
-        
-        # Log simulation results for debugging
-        logging.info(f"AA simulation results: min={min(aa_diffs)}, max={max(aa_diffs)}, mean={avg_aa_mutations:.3f}")
-        logging.info(f"AA simulation distribution: {len([x for x in aa_diffs if x == 0])} zeros, {len([x for x in aa_diffs if x > 0])} non-zeros")
-    else:
-        aa_diffs = []
-        avg_aa_mutations = None
-
-    # ----------------------------
-    # SAVE CSV FOR MUTATION RATES (PANEL 1)
-    # ----------------------------
-    gene_mismatch_csv = os.path.join(results_dir, "gene_mismatch_rate.csv")
-    with open(gene_mismatch_csv, "w", newline="") as csvfile:
-        csvfile.write(f"# gene_id: {hit_id}\n")
-        csvfile.write(f"# background_rate_per_base: {bg_rate:.6f}\n")
-        csvfile.write(f"# background_rate_per_kb: {bg_rate_per_kb:.6f}\n")
-        if is_protein:
-            csvfile.write(f"# is_protein: True\n")
-        else:
-            csvfile.write(f"# is_protein: False\n")
-            csvfile.write(f"# protein_invalid_reasons: {'; '.join(reasons)}\n")
-        csvfile.write("position,mismatch_rate\n")
-        for pos, rate in enumerate(hit_info["pos_rates"], start=1):
-            csvfile.write(f"{pos},{rate:.6f}\n")
-    logging.info(f"Saved CSV for gene mismatch rates: {gene_mismatch_csv}")
-
-    # ----------------------------
-    # SAVE CSV FOR POSITIONS ABOVE BACKGROUND: BASE DISTRIBUTION
-    # ----------------------------
-    base_dist_csv = os.path.join(results_dir, "gene_base_distribution.csv")
-    with open(base_dist_csv, "w", newline="") as csvfile:
-        csvfile.write(f"# gene_id: {hit_id}\n")
-        csvfile.write(f"# background_rate_per_base: {bg_rate:.6f}\n")
-        csvfile.write("position,A_count,C_count,G_count,T_count,N_count,coverage\n")
-        for pos0, rate in enumerate(hit_info["pos_rates"]):
-            if rate > bg_rate:
-                counts   = base_counts[pos0]
-                coverage = hit_info["cov"][pos0]
-                csvfile.write(
-                    f"{pos0+1},"
-                    f"{counts['A']},{counts['C']},{counts['G']},{counts['T']},{counts['N']},"
-                    f"{coverage}\n"
-                )
-    logging.info(f"Saved CSV for base distribution at above-background positions: {base_dist_csv}")
-
-    # ----------------------------
-    # IF PROTEIN: SAVE CSV FOR AA SUBSTITUTION RATES AT ABOVE-BACKGROUND POSITIONS
-    # ----------------------------
-    if is_protein:
-        aa_subst_csv = os.path.join(results_dir, "gene_aa_substitution_rates.csv")
-        aa_rates     = {}
-        for pos0, rate in enumerate(hit_info["pos_rates"]):
-            if rate <= bg_rate:
-                continue
-            ref_base = seq_upper[pos0]
-            cov      = hit_info["cov"][pos0]
-            if cov == 0:
-                continue
-            counts = base_counts[pos0]
-            codon_start         = (pos0 // 3) * 3
-            codon_pos_in_codon  = pos0 % 3
-            codon_seq           = seq_upper[codon_start : codon_start + 3]
-            ref_aa              = str(Seq(codon_seq).translate(to_stop=False))
-            aa_position         = (codon_start // 3) + 1  # 1-based AA index
-
-            for base_allele, cnt in counts.items():
-                if base_allele == ref_base or cnt == 0 or base_allele == "N":
-                    continue
-                mutated_codon_list = list(codon_seq)
-                mutated_codon_list[codon_pos_in_codon] = base_allele
-                mutated_codon = "".join(mutated_codon_list)
-                mutated_aa    = str(Seq(mutated_codon).translate(to_stop=False))
-                if mutated_aa == ref_aa:
-                    continue
-                rate_contribution = cnt / cov
-                key = (pos0 + 1, aa_position, ref_aa, mutated_aa)
-                aa_rates[key] = aa_rates.get(key, 0.0) + rate_contribution
-
-        with open(aa_subst_csv, "w", newline="") as csvfile:
-            csvfile.write(f"# gene_id: {hit_id}\n")
-            csvfile.write(f"# background_rate_per_base: {bg_rate:.6f}\n")
-            csvfile.write("nt_position,aa_position,ref_aa,alt_aa,rate\n")
-            for (nt_pos, aa_pos, ref_aa, alt_aa), rate_val in sorted(aa_rates.items()):
-                csvfile.write(f"{nt_pos},{aa_pos},{ref_aa},{alt_aa},{rate_val:.6f}\n")
-        logging.info(f"Saved CSV for amino acid substitution rates: {aa_subst_csv}")
-
-    plasmid_cov = [0] * len(plasmid_seq)
-    samfile_full = pysam.AlignmentFile(sam_plasmid, "r")
-    for read in samfile_full.fetch():
-        if read.is_unmapped or read.query_sequence is None:
-            continue
-        for read_pos, ref_pos in read.get_aligned_pairs(matches_only=False):
-            if ref_pos is not None and 0 <= ref_pos < len(plasmid_seq):
-                plasmid_cov[ref_pos] += 1
-    samfile_full.close()
-
-    # ----------------------------
-    # SAVE CSV FOR PLASMID COVERAGE (PANEL 2)
-    # ----------------------------
-    plasmid_cov_csv = os.path.join(results_dir, "plasmid_coverage.csv")
-    with open(plasmid_cov_csv, "w", newline="") as csvfile:
-        csvfile.write(f"# plasmid_id: {plasmid_id}\n")
-        csvfile.write(f"# roi_gene_id: {hit_id}\n")
-        csvfile.write(f"# roi_start (1-based): {idx+1}\n")
-        csvfile.write(f"# roi_end (1-based): {idx + len(hit_seq)}\n")
-        csvfile.write("position,coverage\n")
-        for pos, cov in enumerate(plasmid_cov, start=1):
-            csvfile.write(f"{pos},{cov}\n")
-    logging.info(f"Saved CSV for plasmid coverage: {plasmid_cov_csv}")
-
-    # ----------------------------
-    # SAVE CSV FOR AA MUTATION DISTRIBUTION (PANEL 3)
-    # ----------------------------
-    aa_dist_csv = os.path.join(results_dir, "aa_mutation_distribution.csv")
-    with open(aa_dist_csv, "w", newline="") as csvfile:
-        csvfile.write(f"# gene_id: {hit_id}\n")
-        csvfile.write(f"# lambda_bp_mut: {est_mut_per_copy:.6f}\n")
-        csvfile.write(f"# n_trials: 1000\n")
-        if is_protein:
-            csvfile.write("trial_index,aa_mutations\n")
-            for idx_trial, aa_count in enumerate(aa_diffs, start=1):
-                csvfile.write(f"{idx_trial},{aa_count}\n")
-        else:
-            csvfile.write("# No AA distribution because region is not protein-coding\n")
-    logging.info(f"Saved CSV for AA mutation distribution: {aa_dist_csv}")
-
-    # ----------------------------
-    # PREPARE PANEL FIGURE WITH 4 SUBPLOTS
-    # ----------------------------
-    fig, axes = plt.subplots(2, 2, figsize=(18, 12), constrained_layout=True)
-    # axes[0,0]: Mutation rate over gene of interest
-    # axes[0,1]: Rolling mutation rate across plasmid (20 bp window)
-    # axes[1,0]: Coverage of plasmid with ROI shaded
-    # axes[1,1]: KDE of AA mutations per copy
-
-    # --- Panel 1: Mutation rate over gene of interest ---
-    ax0 = axes[0, 0]
-    positions_gene = np.arange(1, len(hit_info["pos_rates"]) + 1)
-    ax0.axhspan(0, bg_rate, color='gray', alpha=0.3, label="Background rate")
-    ax0.plot(positions_gene, hit_info["pos_rates"],
-             color="#2E8B57", linestyle='-', marker='o', markersize=4, alpha=0.8,
-             label="Hit mismatch rate")
+    qscores_to_analyze = []
     
-    # Add Q-score information to title
-    qscore_info = f" (Q{optimal_qscore} filtered)" if optimal_qscore is not None else " (unfiltered)"
-    ax0.set_title(f"Mismatch Rate per Position: Gene of Interest{qscore_info}", fontsize=14, fontweight='bold')
-    ax0.set_xlabel("Position (bp)", fontsize=12)
-    ax0.set_ylabel("Mismatch Rate", fontsize=12)
-    ax0.tick_params(axis='both', which='major', labelsize=10, direction='in', length=6)
-    ax0.tick_params(axis='both', which='minor', direction='in', length=3)
-    ax0.spines['top'].set_visible(False)
-    ax0.spines['right'].set_visible(False)
-    ax0.legend(loc="upper right", frameon=False, fontsize=10)
-
-    # --- Panel 2: Rolling mutation rate across plasmid (20 bp window) ---
-    ax1 = axes[0, 1]
-    rolling_positions, rolling_rates = calculate_rolling_mutation_rate_plasmid(
-        sam_plasmid, plasmid_seq, window_size=20
-    )
-    ax1.axhspan(0, bg_rate, color='gray', alpha=0.3, label="Background rate")
-    ax1.plot(rolling_positions, rolling_rates,
-             color="#FF6B6B", linestyle='-', linewidth=2, alpha=0.8,
-             label="Rolling average (20 bp)")
-    ax1.set_title(f"Rolling Mutation Rate Across Plasmid (20 bp Window){qscore_info}", fontsize=14, fontweight='bold')
-    ax1.set_xlabel("Position on Plasmid (bp)", fontsize=12)
-    ax1.set_ylabel("Mismatch Rate", fontsize=12)
-    ax1.tick_params(axis='both', which='major', labelsize=10, direction='in', length=6)
-    ax1.tick_params(axis='both', which='minor', direction='in', length=3)
-    ax1.spines['top'].set_visible(False)
-    ax1.spines['right'].set_visible(False)
-    ax1.legend(loc="upper right", frameon=False, fontsize=10)
-    # Shade the ROI region
-    start_roi = idx + 1
-    end_roi = idx + len(hit_seq)
-    ax1.axvspan(start_roi, end_roi, color='gray', alpha=0.3, label=f"ROI: {start_roi}–{end_roi}")
-
-    # --- Panel 3: Coverage of plasmid with ROI shaded ---
-    ax2 = axes[1, 0]
-    plasmid_positions = np.arange(1, len(plasmid_cov) + 1)
-    ax2.plot(plasmid_positions, plasmid_cov,
-             linestyle='-', color='black', linewidth=1.0, alpha=0.8, label="Coverage")
-    ax2.set_title(f"Full Plasmid Coverage with ROI Shaded{qscore_info}", fontsize=14, fontweight='bold')
-    ax2.set_xlabel("Position on Plasmid", fontsize=12)
-    ax2.set_ylabel("Coverage (# reads)", fontsize=12)
-    ax2.tick_params(axis='both', which='major', labelsize=10, direction='in', length=6)
-    ax2.tick_params(axis='both', which='minor', direction='in', length=3)
-    ax2.spines['top'].set_visible(False)
-    ax2.spines['right'].set_visible(False)
-    start_roi = idx + 1
-    end_roi   = idx + len(hit_seq)
-    ax2.axvspan(start_roi, end_roi, color='gray', alpha=0.3, label=f"ROI: {start_roi}–{end_roi}")
-
-    # --- Panel 4: KDE of AA mutations per copy ---
-    ax3 = axes[1, 1]
-    if is_protein and aa_diffs and len(aa_diffs) > 0:
-        x_vals = np.array(aa_diffs)
-        unique_vals = np.unique(x_vals)
-        
-        if len(unique_vals) > 1:
-            # Multiple unique values - use KDE or histogram
-            if HAVE_SCIPY:
-                try:
-                    kde = gaussian_kde(x_vals)
-                    x_grid = np.linspace(0, max(x_vals), 200)
-                    kde_values = kde(x_grid)
-                    ax3.plot(x_grid, kde_values,
-                             color="#C44E52", linewidth=2.0, alpha=0.8, label="KDE")
-                    ax3.fill_between(x_grid, kde_values, color="#C44E52", alpha=0.3)
-                    ax3.set_ylim(bottom=0)
-                except Exception as e:
-                    logging.warning(f"KDE failed, using histogram: {e}")
-                    # Fallback to histogram
-                    ax3.hist(x_vals, bins=range(0, max(x_vals) + 2), density=True,
-                             color="#C44E52", alpha=0.6, edgecolor='black', label="Histogram")
+    # Add unfiltered analysis
+    qscores_to_analyze.append((None, fastq_path, "unfiltered"))
+    
+    # Add Q-score filtered analyses if QC results are available
+    if qc_results is not None:
+        for result in qc_results:
+            qscore = result['quality_threshold']
+            filtered_fastq_path = os.path.join(work_dir, f"{sample_name}_q{qscore}.fastq.gz")
+            if run_nanofilt_filtering(fastq_path, qscore, filtered_fastq_path):
+                qscores_to_analyze.append((qscore, filtered_fastq_path, f"Q{qscore}"))
+                logging.info(f"Successfully created Q{qscore} filtered data for analysis.")
             else:
-                # No scipy - use histogram
-                ax3.hist(x_vals, bins=range(0, max(x_vals) + 2), density=True,
-                         color="#C44E52", alpha=0.6, edgecolor='black', label="Histogram")
-        else:
-            # All values are the same - show a single bar
-            single_val = unique_vals[0]
-            ax3.bar(single_val, 1.0, width=0.8, color="#C44E52", alpha=0.6, 
-                   edgecolor='black', label=f"All trials: {single_val} mutations")
-            ax3.set_xlim(single_val - 1, single_val + 1)
-            ax3.set_ylim(0, 1.2)
-        
-        ax3.set_title("Distribution of Amino Acid Mutations per Gene", fontsize=14, fontweight='bold')
-        ax3.set_xlabel("Number of AA Mutations", fontsize=12)
-        ax3.set_ylabel("Density", fontsize=12)
-        ax3.tick_params(axis='both', which='major', labelsize=10, direction='in', length=6)
-        ax3.tick_params(axis='both', which='minor', direction='in', length=3)
-        ax3.spines['top'].set_visible(False)
-        ax3.spines['right'].set_visible(False)
-    else:
-        # Not protein-coding or no data
-        if is_protein:
-            ax3.text(0.5, 0.5, "No AA simulation data\n(λ_bp may be too low)", 
-                     horizontalalignment='center', verticalalignment='center', 
-                     fontsize=12, color='gray', transform=ax3.transAxes)
-        else:
-            ax3.text(0.5, 0.5, "Not a protein‐coding region", 
-                     horizontalalignment='center', verticalalignment='center', 
-                     fontsize=12, color='gray', transform=ax3.transAxes)
-        
-        ax3.set_title("AA Mutation Distribution", fontsize=14, fontweight='bold')
-        ax3.set_xlabel("Number of AA Mutations", fontsize=12)
-        ax3.set_ylabel("Density", fontsize=12)
-        ax3.spines['top'].set_visible(False)
-        ax3.spines['right'].set_visible(False)
-        ax3.set_xticks([])
-        ax3.set_yticks([])
-
-    # Save the combined figure as both PNG and PDF
-    panel_path_png = os.path.join(results_dir, "summary_panels.png")
-    panel_path_pdf = os.path.join(results_dir, "summary_panels.pdf")
-    fig.savefig(panel_path_png, dpi=150, transparent=False)
-    fig.savefig(panel_path_pdf)  # vector format
-    plt.close(fig)
-    logging.info(f"Saved combined panel figure as PNG: {panel_path_png}")
-    logging.info(f"Saved combined panel figure as PDF: {panel_path_pdf}")
-
-    # ----------------------------
-    # COMPUTE MUTATION SPECTRUM FOR ABOVE-BACKGROUND POSITIONS
-    # ----------------------------
-    # Define categories and reference percentages
-    categories = {
-        "A→G, T→C":    {"pairs": [("A", "G"), ("T", "C")], "ref": 17.5},
-        "G→A, C→T":    {"pairs": [("G", "A"), ("C", "T")], "ref": 25.5},
-        "A→T, T→A":    {"pairs": [("A", "T"), ("T", "A")], "ref": 28.5},
-        "A→C, T→G":    {"pairs": [("A", "C"), ("T", "G")], "ref": 4.7},
-        "G→C, C→G":    {"pairs": [("G", "C"), ("C", "G")], "ref": 4.1},
-        "G→T, C→A":    {"pairs": [("G", "T"), ("C", "A")], "ref": 14.1},
-    }
-
-    # Tally observed counts at above-background positions
-    category_counts = {cat: 0 for cat in categories}
-    total_alt_counts = 0
-
-    for pos0, rate in enumerate(hit_info["pos_rates"]):
-        if rate <= bg_rate:
-            continue
-        ref_base = seq_upper[pos0]
-        counts   = base_counts[pos0]
-        for alt_base in ("A", "C", "G", "T"):
-            if alt_base == ref_base:
-                continue
-            cnt = counts.get(alt_base, 0)
-            if cnt == 0:
-                continue
-            # Determine which category this (ref→alt) belongs to
-            for cat, info in categories.items():
-                if (ref_base, alt_base) in info["pairs"]:
-                    category_counts[cat] += cnt
-                    total_alt_counts += cnt
-                    break
-
-    # Compute sample percentages
-    sample_percent = {}
-    if total_alt_counts > 0:
-        for cat, cnt in category_counts.items():
-            sample_percent[cat] = 100.0 * cnt / total_alt_counts
-    else:
-        for cat in categories:
-            sample_percent[cat] = 0.0
-
-    # ----------------------------
-    # GENERATE PDF TABLE (MUTATION SPECTRUM)
-    # ----------------------------
-    pdf_path = os.path.join(results_dir, f"{sample_name}_mutation_spectrum.pdf")
-    # Prepare table data
-    table_rows = []
-    for cat in categories:
-        ref_pct = categories[cat]["ref"]
-        samp_pct = sample_percent[cat]
-        table_rows.append([cat, f"{ref_pct:.1f}%", f"{samp_pct:.1f}%"])
-
-    # Create a matplotlib figure for the table
-    fig, ax = plt.subplots(figsize=(6, 3))  # adjust size as needed
-    ax.axis("off")
-
-    col_labels = ["Mutation Type", "Mutazyme II reference", sample_name]
-    tbl = ax.table(
-        cellText=table_rows,
-        colLabels=col_labels,
-        cellLoc="center",
-        colLoc="center",
-        loc="center"
-    )
-    tbl.auto_set_font_size(False)
-    tbl.set_fontsize(10)
-    tbl.scale(1, 1.5)  # stretch rows
-
-    # Add a title
-    ax.set_title("Mutation Spectrum (Above-Background Sites)", fontsize=12, fontweight="bold", pad=20)
-
-    # Save as PDF
-    fig.savefig(pdf_path, format="pdf", bbox_inches="tight")
-    plt.close(fig)
-    logging.info(f"Saved mutation spectrum table as PDF: {pdf_path}")
-
-    # ----------------------------
-    # WRITE PER-SAMPLE SUMMARY TXT
-    # ----------------------------
-    sample_summary_path = os.path.join(results_dir, "summary.txt")
-    with open(sample_summary_path, "w") as txtf:
-        txtf.write(f"Sample: {sample_name}\n")
-        txtf.write(f"{'=' * (8 + len(sample_name))}\n\n")
-        txtf.write("1) Background (plasmid excluding target):\n")
-        txtf.write(f"   • Total mismatches:    {bg_mis}\n")
-        txtf.write(f"   • Total covered bases: {bg_cov}\n")
-        txtf.write(f"   • Mapped reads:        {bg_reads}\n")
-        txtf.write(f"   • Rate (per base):     {bg_rate:.6e}\n")
-        txtf.write(f"   • Rate (per kb):       {bg_rate_per_kb:.6e}\n\n")
-
-        txtf.write("2) Target (ROI) stats:\n")
-        txtf.write(f"   • Gene ID:            {hit_id}\n")
-        txtf.write(f"   • Total mismatches:   {hit_mis}\n")
-        txtf.write(f"   • Total covered bases:{hit_cov}\n")
-        txtf.write(f"   • Mapped reads:       {hit_reads}\n")
-        txtf.write(f"   • Rate (per base):    {hit_rate:.6e}\n")
-        txtf.write(f"   • Rate (per kb):      {hit_rate_per_kb:.6e}\n")
-        txtf.write(f"   • Z‐statistic:        {z_stat:.4f}\n")
-        txtf.write(f"   • p‐value:            {p_val if p_val is not None else 'N/A'}\n")
-        txtf.write(f"   • Estimated mutations per copy: {est_mut_per_copy:.6e}\n\n")
-
-        txtf.write("3) Protein‐coding evaluation:\n")
-        txtf.write(f"   • Is protein: {is_protein}\n")
-        if is_protein:
-            txtf.write(f"   • Average AA mutations per copy (simulated): {avg_aa_mutations:.3f}\n")
-        else:
-            txtf.write(f"   • Reason(s): {('; '.join(reasons) if reasons else 'N/A')}\n")
-        txtf.write("\n4) Mutation spectrum (above-background sites):\n")
-        for cat in categories:
-            txtf.write(f"   • {cat}: {sample_percent[cat]:.1f}%  (Ref: {categories[cat]['ref']:.1f}%)\n")
-        txtf.write("\n5) Output files written to:\n")
-        txtf.write(f"   • {gene_mismatch_csv}\n")
-        txtf.write(f"   • {base_dist_csv}\n")
-        if is_protein:
-            txtf.write(f"   • {aa_subst_csv}\n")
-        txtf.write(f"   • {plasmid_cov_csv}\n")
-        txtf.write(f"   • {aa_dist_csv}\n")
-        txtf.write(f"   • {panel_path_png} (figure)\n")
-        txtf.write(f"   • {panel_path_pdf} (figure)\n")
-        txtf.write(f"   • {pdf_path} (mutation spectrum table)\n")
-        txtf.write(f"   • comprehensive_qc_analysis.png (Comprehensive QC plot with error bars)\n")
-        txtf.write(f"   • error_analysis.png (Detailed error analysis plots)\n")
-        txtf.write(f"   • comprehensive_qc_data.csv (Comprehensive QC data with error estimates)\n")
-
-    logging.info(f"Wrote per-sample summary to: {sample_summary_path}")
-
-    # ----------------------------
-    # APPEND TO MASTER SUMMARY TXT
-    # ----------------------------
-    # Each sample's key stats go into a single line in master_summary.txt
-    with open(master_summary_path, "a") as masterf:
-        masterf.write(
-            f"{sample_name}\t"
-            f"{bg_rate:.6e}\t"
-            f"{hit_rate:.6e}\t"
-            f"{z_stat:.4f}\t"
-            f"{p_val if p_val is not None else 'NA'}\t"
-            f"{est_mut_per_copy:.6e}\t"
-            f"{is_protein}\n"
+                logging.warning(f"Failed to create Q{qscore} filtered data.")
+    
+    logging.info(f"Will run main analysis for {len(qscores_to_analyze)} conditions: {[desc for _, _, desc in qscores_to_analyze]}")
+    
+    # Run main analysis for each Q-score condition
+    analysis_results = []
+    for qscore, analysis_fastq_path, qscore_desc in qscores_to_analyze:
+        result = run_main_analysis_for_qscore(
+            analysis_fastq_path, qscore, qscore_desc, sample_name, work_dir, results_dir,
+            chunks, ref_hit_fasta, plasmid_fasta, hit_seq, hit_id, plasmid_seq, idx
         )
+        analysis_results.append(result)
 
     # ----------------------------
     # CLEAN UP: remove this sample's work_dir entirely
