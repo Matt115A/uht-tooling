@@ -9,7 +9,7 @@ MUTATION_CALLER=scripts/mutation_caller.py
 
 # Rules
 
-.PHONY: all nextera_primers umi_hunter design_slim mutation_caller profile_inserts
+.PHONY: all nextera_primers umi_hunter design_slim mutation_caller profile_inserts gui
 
 all: nextera_primers umi_hunter design_slim mutation_caller profile_inserts
 
@@ -33,6 +33,9 @@ design_gibson:
 
 profile_inserts:
 	python -m scripts.profile_inserts
+
+gui:
+	python -m scripts.gui
 
 clean:
 	rm -rf results/*.png

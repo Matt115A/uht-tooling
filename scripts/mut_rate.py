@@ -476,7 +476,7 @@ def run_qc_analysis(fastq_path, results_dir):
     logging.info("Starting simple QC analysis with segmentation-based error estimation")
     
     # Define quality thresholds to test
-    quality_thresholds = [16, 18, 20, 22, 24, 26]
+    quality_thresholds = [10, 12, 14, 16, 18, 20, 22, 24, 26]
     
     # Paths to reference files
     ref_hit_fasta = os.path.join(DATA_DIR, "region_of_interest.fasta")

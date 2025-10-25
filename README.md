@@ -39,6 +39,30 @@ Navigate to `/uht-tooling/` and run:
 - `make ep-library-profile`
 - `make design_gibson`
 - `make profile_inserts`
+- `make gui` - Launch interactive GUI (optional)
+
+---
+
+## Interactive GUI (Optional)
+
+A web-based GUI is available for convenient interaction with the tools:
+
+```bash
+make gui
+```
+
+This will launch a local web interface at `http://127.0.0.1:7860` where you can:
+- Design Nextera primers interactively
+- Design SLIM and Gibson assembly primers
+- Input sequences and mutations directly
+- View results immediately
+
+**Note:** The GUI is optional. All existing command-line workflows continue to work as before. The GUI is a non-destructive wrapper that calls the same underlying scripts.
+
+**Requirements:** Gradio is included in `requirements.txt`. Install with:
+```bash
+pip install gradio
+```
 
 ---
 
