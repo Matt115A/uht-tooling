@@ -114,7 +114,9 @@ For long-read sequencing libraries tagged with UMIs:
 ## Identifying and Counting Mutants from Long-Read Data Without UMIs
 
 - Save your gene reference (coding sequence only) in `data/mutation_caller/mutation_caller_template.fasta`.
-- Place your `.fastq.gz` file in `data/mutation_caller/` and run `make mutation_caller`.
+- Place your `.fastq.gz` file in `data/mutation_caller/` and place a .csv file there too called mutation_caller.csv
+- mutation_caller.csv should have two columns: one being gene_flanks and the second being gene_min_max. The first row of gene_flanks should be a 8-12bp region directly upstream of the GOI, and the second row should be the same immediately downstream. The first row of gene_min_max should be the min length of a valid gene, and the second should be the maximum length of a valid gene.
+- Run `make mutation_caller`.
 - The script outputs mutation counts and co-occurrence data to `results/mutation_caller/`.
 
 ---
