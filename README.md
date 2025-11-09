@@ -24,6 +24,19 @@ Navigate to `/uht-tooling/` and run:
 
 ---
 
+## Quickstart + GUI! 
+
+python -m pip install \
+     --index-url https://test.pypi.org/simple \
+     --extra-index-url https://pypi.org/simple \
+     "uht-tooling[gui]==0.1.2"
+
+For the command-line tool. Run 
+
+uht-tooling --help for further information, including on how to run the gui.
+
+---
+
 ## General Structure
 
 - Configs and data are found in `data/.../`, where `...` depends on the script you wish to run.
